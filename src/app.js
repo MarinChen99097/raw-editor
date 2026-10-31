@@ -41,6 +41,8 @@ class Decoder {
 }
 let decoder = new Decoder();
 async function decodeFile(file, opts, onProgress) {
+  if (file._isImage === undefined) file._isImage = await isBrowserImage(file, RAW_EXT);
+  if (file._isImage) return decodeBrowserImage(file, opts, onProgress);
   // fresh worker per decode so the wasm heap is released afterwards (important on phones)
   const d = new Decoder(); await d.init();
   try {
@@ -49,11 +51,21 @@ async function decodeFile(file, opts, onProgress) {
   } finally { d.terminate(); }
 }
 
+function friendlyError(e) {
+  const m = (e && e.message) || String(e);
+  if (m.includes('JXL_DNG')) return '這張 ProRAW 用 JPEG-XL 壓縮，瀏覽器版 LibRaw 解不開。請到 iPhone「設定 > 相機 > 格式 > ProRAW 格式」改選「JPEG」後再拍。';
+  if (/Unsupported file format|not RAW file/i.test(m)) return '不是支援的 RAW 或圖片格式（' + m + '）';
+  return m;
+}
+
 // ---------- state ----------
 const images = []; let cur = -1;
 const state = { zoom: 1, panX: 0, panY: 0, compare: 0, split: 0.5, cropMode: false, tab: 'light', hq: false, hist: true, clipboard: null, previewData: null, busy: false,
   maskSel: -1, showMask: false, tool: { size: 20, feather: 60, flow: 100, erase: false }, cursor: null };
 const TOOL_DEFAULTS = { size: 20, feather: 60, flow: 100 };
+// JPEG/HEIC/PNG were already sharpened and denoised in the camera, so they start without the RAW capture sharpening / colour NR.
+const IMG_DEFAULTS = Object.assign(clone(DEFAULTS), { sharpen: 0, nrColor: 0 });
+const defaultsFor = imOrFile => { const f = imOrFile && (imOrFile.file || imOrFile); return f && f._isImage ? IMG_DEFAULTS : DEFAULTS; };
 let renderer; try { renderer = new Renderer($('#view')); } catch (e) { $('#drop').innerHTML = '<h1>無法啟動</h1><p>' + e.message + '</p>'; throw e; }
 const curveEd = new CurveEditor(document.createElement('canvas'), () => { onCurveChange(); });
 const CUR = () => images[cur];
@@ -200,7 +212,7 @@ const setPath = (o, path, v) => { const ks = path.split('.'); const last = ks.po
 function sliderTarget(path) {
   if (path.startsWith('M.')) return [activeMask(), path.slice(2), MASK_DEFAULTS];
   if (path.startsWith('T.')) return [state.tool, path.slice(2), TOOL_DEFAULTS];
-  return [CUR() ? CUR().params : null, path, DEFAULTS];
+  return [CUR() ? CUR().params : null, path, defaultsFor(CUR())];
 }
 function makeSlider(path, label, min, max, step, format, grad) {
   const [, sub0, defs] = sliderTarget(path); const def = getPath(defs, sub0);
@@ -323,7 +335,7 @@ function selectTab(id) {
   else drawOverlay(); // handles / crop frame only
   fitCanvas();
 }
-function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(DEFAULTS, k)); refreshAll(); commit(); }
+function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
 function refreshAll() { refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) curveEd.setCurves(CUR().params.curves); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
@@ -474,7 +486,7 @@ function buildPresetPanel(sec) {
   renderPresetGrid();
 }
 // the amount slider lives outside params: emulate a param path on a side object
-Object.defineProperty(DEFAULTS, '_presetAmount', { value: 100, enumerable: false });
+for (const d of [DEFAULTS, IMG_DEFAULTS]) Object.defineProperty(d, '_presetAmount', { value: 100, enumerable: false });
 function renderPresetGrid() {
   const grid = presetUI.grid; if (!grid) return; grid.innerHTML = '';
   PRESETS.forEach((p, i) => grid.append(el('button', { 'data-id': 'b' + i, onclick: () => applyPresetUI(p, 'b' + i) }, p.name, el('small', {}, p.en))));
@@ -500,7 +512,7 @@ function commit() {
   const im = CUR(); if (!im) return; const snap = JSON.stringify(im.params);
   if (im.hist[im.hi] === snap) return;
   im.hist = im.hist.slice(0, im.hi + 1); im.hist.push(snap); if (im.hist.length > 60) im.hist.shift(); im.hi = im.hist.length - 1;
-  im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(defaultParams()); updateUndoButtons(); saveEdits(im); updateFilmstrip();
+  im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(clone(defaultsFor(im))); updateUndoButtons(); saveEdits(im); updateFilmstrip();
 }
 function stripAmount(p) { const c = clone(p); delete c._presetAmount; return c; }
 function undo() { const im = CUR(); if (!im || im.hi <= 0) return; im.hi--; im.params = JSON.parse(im.hist[im.hi]); im.presetId = null; refreshAll(); updateUndoButtons(); saveEdits(im); }
@@ -811,14 +823,24 @@ cmpBtn.addEventListener('pointerup', cmpUp); cmpBtn.addEventListener('pointercan
 cmpBtn.addEventListener('dblclick', () => { if (!CUR()) return; ensureBefore(); state.compare = state.compare === 2 ? 0 : 2; cmpBtn.classList.toggle('on', state.compare === 2); draw(); toast(state.compare === 2 ? '分割檢視：左原圖 / 右編輯。拖曳分隔線可移動。' : '離開分割檢視'); });
 
 // ---------- files ----------
+if (IS_IOS || IS_TOUCH) $('#fileInput').removeAttribute('accept');
+if (IS_IOS) $('#iosHint').style.display = '';
 $('#btnOpen').onclick = $('#btnOpen2').onclick = () => $('#fileInput').click();
 $('#fileInput').addEventListener('change', e => { addFiles([...e.target.files]); e.target.value = ''; });
 const vw = $('#viewwrap');
 vw.addEventListener('dragover', e => { e.preventDefault(); }); vw.addEventListener('drop', e => { e.preventDefault(); addFiles([...e.dataTransfer.files]); });
 const RAW_EXT = /\.(arw|srf|sr2|nef|nrw|raf|dng|cr2|cr3|crw|orf|rw2|pef|srw|x3f|3fr|fff|iiq|rwl|raw|mrw|erf|kdc|dcr|mos|mef)$/i;
 async function addFiles(files) {
-  const jsons = files.filter(f => /\.json$/i.test(f.name)); const raws = files.filter(f => RAW_EXT.test(f.name) || /\.jpe?g$/i.test(f.name));
-  if (!raws.length && !jsons.length) { toast('沒有可開啟的 RAW 檔'); return; }
+  const jsons = files.filter(f => /\.json$/i.test(f.name)); const raws = []; let skipped = 0;
+  for (const f of files) {
+    if (/\.json$/i.test(f.name)) continue;
+    f._isImage = await isBrowserImage(f, RAW_EXT);
+    if (f._isImage || RAW_EXT.test(f.name)) raws.push(f);
+    else if (/^(video|audio|text)\//.test(f.type || '') || /\.(mov|mp4|m4v|avi|pdf|zip|txt|aae|xmp|nksc)$/i.test(f.name)) skipped++;
+    else raws.push(f); // unknown extension: let LibRaw try
+  }
+  if (skipped) toast(`已略過 ${skipped} 個不支援的檔案（影片、文件等）`);
+  if (!raws.length && !jsons.length) { if (!skipped) toast('沒有可開啟的照片'); return; }
   const sidecars = new Map(); for (const j of jsons) { try { sidecars.set(j.name.replace(/\.json$/i, '').toLowerCase(), JSON.parse(await j.text())); } catch { } }
   // a lone json: apply to current image
   if (!raws.length && jsons.length && CUR()) { const j = [...sidecars.values()][0]; applyLoadedSettings(j); return; }
@@ -828,7 +850,7 @@ async function addFiles(files) {
     const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
     const side = sidecars.get(base) || sidecars.get(f.name.toLowerCase());
     const saved = loadEdits(imgKey(f));
-    const params = side ? mergeParams(side.params || side) : (saved || defaultParams());
+    const params = side ? mergeParams(side.params || side) : (saved || clone(defaultsFor(f)));
     const im = { id: Math.random().toString(36).slice(2), file: f, name: f.name, key: imgKey(f), params, hist: [JSON.stringify(params)], hi: 0, edited: !!(side || saved), meta: null, thumbUrl: null, fullW: 0, fullH: 0 };
     images.push(im); if (firstNew < 0) firstNew = images.length - 1;
     makeThumb(im);
@@ -849,7 +871,8 @@ async function makeThumbNow(im) {
   try {
     const r = await decodeFile(im.file, { wantThumb: true, thumbOnly: true });
     im.meta = r.meta; if (r.lensMD !== undefined) im.lensMD = r.lensMD;
-    if (r.thumb) { const blob = new Blob([r.thumb], { type: 'image/jpeg' }); im.thumbBlobUrl = URL.createObjectURL(blob); try { const bm = await createImageBitmap(blob, { resizeWidth: 240, resizeQuality: 'medium' }); const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0); im.thumbUrl = c.toDataURL('image/jpeg', 0.7); bm.close(); } catch { im.thumbUrl = im.thumbBlobUrl; } }
+    if (r.thumbURL) { im.thumbUrl = r.thumbURL; if (!im.thumbBlobUrl) im.thumbBlobUrl = URL.createObjectURL(im.file); }
+    else if (r.thumb) { const blob = new Blob([r.thumb], { type: 'image/jpeg' }); im.thumbBlobUrl = URL.createObjectURL(blob); try { const bm = await createImageBitmap(blob, { resizeWidth: 240, resizeQuality: 'medium' }); const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0); im.thumbUrl = c.toDataURL('image/jpeg', 0.7); bm.close(); } catch { im.thumbUrl = im.thumbBlobUrl; } }
     updateFilmstrip(); if (CUR() === im) showInfo();
   } catch (e) { console.warn('thumb', e); }
 }
@@ -865,17 +888,20 @@ async function selectImage(i) {
   try {
     const r = await decodeFile(im.file, { half: true, wantThumb: !im.thumbBlobUrl }, p => { if (seq === loadSeq) status(p); });
     if (seq !== loadSeq) return; // user moved on
-    im.meta = r.meta; im.lensMD = r.lensMD ?? null; im.previewW = r.width; im.previewH = r.height; im.previewScale = 2; im.fullW = r.width * 2; im.fullH = r.height * 2;
-    if (im.meta && im.meta.width && Math.abs(im.meta.width - im.fullW) <= 2) { im.fullW = im.meta.width; im.fullH = im.meta.height; }
-    state.previewData = { data: r.data, w: r.width, h: r.height, scale: 2, imId: im.id };
-    renderer.setSource(r.data, r.width, r.height, 2, im.fullW, im.fullH);
+    const sc = r.scale || 2;
+    im.meta = r.meta; im.lensMD = r.lensMD ?? null; im.previewW = r.width; im.previewH = r.height; im.previewScale = sc; im.fullW = r.width * sc; im.fullH = r.height * sc;
+    if (im.meta && im.meta.width) { const mw = (im.meta.flip & 4) ? im.meta.height : im.meta.width, mh = (im.meta.flip & 4) ? im.meta.width : im.meta.height; if (Math.abs(mw - im.fullW) <= 2 && Math.abs(mh - im.fullH) <= 2) { im.fullW = mw; im.fullH = mh; } }
+    state.previewData = { data: r.data, w: r.width, h: r.height, scale: sc, imId: im.id };
+    renderer.setSource(r.data, r.width, r.height, sc, im.fullW, im.fullH);
+    if (r.thumbURL && !im.thumbUrl) { im.thumbUrl = r.thumbURL; updateFilmstrip(); }
     if (r.thumb && !im.thumbBlobUrl) { im.thumbBlobUrl = URL.createObjectURL(new Blob([r.thumb], { type: 'image/jpeg' })); im.thumbUrl = im.thumbBlobUrl; updateFilmstrip(); }
     ti.style.display = 'none';
     curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveEd.lutRGBA());
     fitCanvas(); fitView(); refreshLensUI(); refreshLocalUI(); requestRender(false); showInfo(); $('#btnExport').disabled = false;
     $('#finfo').textContent = `${im.fullW}×${im.fullH} · 預覽 ${r.width}×${r.height} · ${(r.timings.total / 1000).toFixed(1)}s`;
     status('');
-  } catch (e) { if (seq === loadSeq) { status(''); toast('無法解碼：' + e.message, 5000); ti.style.display = 'none'; } console.error(e); }
+    if (im.file._isImage && IS_IOS && /\.jpe?g$/i.test(im.name) && !selectImage.iosHint) { selectImage.iosHint = true; toast('提示：從「照片圖庫」選的照片，iPhone 一律轉成 JPEG 給網頁，RAW 也會被轉。要修 RAW 請按＋選「選擇檔案」。', 8000); }
+  } catch (e) { if (seq === loadSeq) { status(''); toast('無法開啟：' + friendlyError(e), 8000); ti.style.display = 'none'; } console.error(e); }
 }
 function updateFilmstrip() {
   const fs = $('#filmstrip'); fs.innerHTML = '';
@@ -888,7 +914,7 @@ function showInfo() {
   const im = CUR(); const box = $('#infobox'); if (!im) { box.textContent = '尚未開啟照片。'; return; } const m = im.meta || {};
   const sh = m.shutter ? (m.shutter >= 1 ? m.shutter.toFixed(1) + 's' : '1/' + Math.round(1 / m.shutter) + 's') : '';
   const dt = m.timestamp ? new Date(m.timestamp * 1000).toLocaleString() : '';
-  box.innerHTML = `<b>${im.name}</b><br>${[m.make, m.model].filter(Boolean).join(' ')}<br>${m.lens || ''}<br>${[m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + m.aperture.toFixed(1) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean).join(' · ')}<br>${dt}<br>${im.fullW ? `尺寸 ${im.fullW}×${im.fullH}` : ''} ${m.filters === 9 ? '· X-Trans' : m.filters ? '· Bayer' : ''}<br><span style="font-size:11px">檔案大小 ${(im.file.size / 1048576).toFixed(1)} MB</span>`;
+  box.innerHTML = `<b>${im.name}</b><br>${[m.make, m.model].filter(Boolean).join(' ')}<br>${m.lens || ''}<br>${[m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + m.aperture.toFixed(1) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean).join(' · ')}<br>${dt}<br>${im.fullW ? `尺寸 ${im.fullW}×${im.fullH}` : ''} ${m.kind === 'image' ? '· ' + m.format : m.filters === 9 ? '· X-Trans' : m.filters ? '· Bayer' : m.colors === 3 ? '· 線性 DNG' : ''}<br><span style="font-size:11px">檔案大小 ${(im.file.size / 1048576).toFixed(1)} MB</span>`;
 }
 
 // ---------- settings json / clipboard ----------
@@ -903,7 +929,7 @@ $('#mLoadJson').onclick = () => { const inp = el('input', { type: 'file', accept
 $('#mCopy').onclick = () => { const im = CUR(); if (!im) return; state.clipboard = stripAmount(im.params); toast('已複製設定'); };
 $('#mPaste').onclick = () => { const im = CUR(); if (!im || !state.clipboard) return; const geo = im.params.geo; im.params = mergeParams(state.clipboard); im.params.geo = geo; im.presetId = null; refreshAll(); commit(); toast('已貼上設定（不含裁切）'); };
 $('#mPasteAll').onclick = () => { if (!state.clipboard) { toast('請先複製設定'); return; } for (const im of images) { const geo = im.params.geo; im.params = mergeParams(state.clipboard); im.params.geo = geo; im.hist = [JSON.stringify(im.params)]; im.hi = 0; im.edited = true; saveEdits(im); } refreshAll(); toast('已套用到 ' + images.length + ' 張'); };
-$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = defaultParams(); im.presetId = null; refreshAll(); fitView(); commit(); };
+$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = clone(defaultsFor(im)); im.presetId = null; refreshAll(); fitView(); commit(); };
 $('#mExportPresets').onclick = () => download(new Blob([JSON.stringify({ app: 'RAW Editor', presets: userPresets }, null, 1)], { type: 'application/json' }), 'raw-editor-presets.json');
 $('#mImportPresets').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { const j = JSON.parse(await inp.files[0].text()); const list = j.presets || (Array.isArray(j) ? j : null); if (!list) throw new Error('格式不符'); for (const p of list) if (p && p.name && p.p) userPresets.push(p); saveUserPresets(); renderPresetGrid(); toast('已匯入 ' + list.length + ' 個預設集'); } catch (e) { toast('匯入失敗：' + e.message); } }; inp.click(); };
 $('#optHQ').checked = state.hq; $('#optHQ').onchange = e => { state.hq = e.target.checked; try { localStorage.setItem('rawedit:hq', state.hq ? '1' : '0'); } catch { } };
@@ -952,7 +978,7 @@ $('#expGo').onclick = async () => {
       $('#expMsg').append(el('div', { class: 'hint' }, `完成：${results[0].name}（${(results[0].blob.size / 1048576).toFixed(1)} MB）`), row);
     } else if (results.length) $('#expMsg').textContent = `完成 ${results.length} 張，共 ${(results.reduce((a, r) => a + r.blob.size, 0) / 1048576).toFixed(1)} MB`;
     else if (state.cancelExport) $('#expMsg').textContent = '已取消';
-  } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + e.message; }
+  } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + friendlyError(e); }
   finally { state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
 };
 async function exportImage(im, o, prog) {
@@ -962,7 +988,7 @@ async function exportImage(im, o, prog) {
   // choose decode scale: half-size is a true box downsample, good when the target is at most half of the full output
   let src;
   if (target <= longEdge / 2 && state.previewData && state.previewData.imId === im.id) { src = state.previewData; }
-  else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 2 }; }
+  else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: r.scale || 2 }; }
   else { prog('全解析度解碼，請稍候…', 0.02); const q = o.demosaic === 'auto' ? undefined : +o.demosaic; const r = await decodeFile(im.file, { half: false, quality: q }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 1 }; }
   if (state.cancelExport) return null;
   const fullW = src.w * src.scale, fullH = src.h * src.scale;

@@ -121,7 +121,7 @@ button.danger { color: #ff8a8a; }
 <div id="app">
   <div id="topbar">
     <button id="btnOpen" class="icon" title="開啟 RAW">＋</button>
-    <input id="fileInput" type="file" multiple accept=".arw,.nef,.nrw,.raf,.dng,.cr2,.cr3,.orf,.rw2,.pef,.srw,.x3f,.3fr,.iiq,.rwl,.raw,.jpg,.jpeg,.json" style="display:none">
+    <input id="fileInput" type="file" multiple accept=".arw,.nef,.nrw,.raf,.dng,.cr2,.cr3,.orf,.rw2,.pef,.srw,.x3f,.3fr,.iiq,.rwl,.raw,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif,.tif,.tiff,.json" style="display:none">
     <div class="title"><b id="fname">RAW Editor</b> <span id="finfo"></span></div>
     <button id="btnUndo" class="icon" title="復原 (Ctrl+Z)" disabled>↶</button>
     <button id="btnRedo" class="icon" title="重做 (Ctrl+Shift+Z)" disabled>↷</button>
@@ -140,8 +140,9 @@ button.danger { color: #ff8a8a; }
     <div id="status"></div>
     <div id="drop">
       <h1>RAW Editor</h1>
-      <p>純瀏覽器 RAW 修圖。支援 Sony ARW、Nikon NEF、Fujifilm RAF（含 X-Trans）、Ricoh DNG 等 1200+ 機型。檔案不會離開你的裝置。</p>
-      <button class="big primary" id="btnOpen2">選擇 RAW 檔案</button>
+      <p>純瀏覽器 RAW 修圖。支援 Sony ARW、Nikon NEF、Fujifilm RAF（含 X-Trans）、Ricoh DNG、iPhone ProRAW 等 1200+ 機型，也能修 JPEG／HEIC／PNG。檔案不會離開你的裝置。</p>
+      <button class="big primary" id="btnOpen2">選擇照片</button>
+      <p class="hint" id="iosHint" style="display:none">iPhone：RAW 檔請選「選擇檔案」。「照片圖庫」只會給 JPEG。</p>
       <p>桌機可直接把檔案拖進來。同名的 .json 設定檔會一併套用。</p>
       <p id="caps" class="hint"></p>
     </div>
@@ -440,6 +441,14 @@ function readLens(lr) {
   return { lensMake: s(20, 128), lens: s(148, 128) };
 }
 
+// DNG 1.7 JPEG-XL (compression 52546) needs Adobe's DNG SDK, which this LibRaw build does not include.
+// Detect it up front so the user gets an actionable message instead of a generic LibRaw error.
+function isJxlDng(ab) {
+  try {
+    const f = tiffWalk(ab, 0, [0xfe, 0x103], 40); const comp = f[0x103] || [], sub = f[0xfe] || [];
+    return comp.some(c => c.vals && c.vals[0] === 52546 && sub.some(s => s.ifd === c.ifd && s.vals && s.vals[0] === 0));
+  } catch { return false; }
+}
 self.onmessage = async (e) => {
   const { id, cmd } = e.data;
   try {
@@ -454,10 +463,12 @@ self.onmessage = async (e) => {
     }
     if (cmd === 'decode') {
       if (!M) throw new Error('worker not initialised');
-      const { buffer, opts } = e.data;
+      let { buffer } = e.data; const { opts } = e.data;
       const t0 = performance.now();
       const out = { timings: {} };
       // Nikon lossless NEF: decode the Huffman strip in JS (much faster than LibRaw in wasm), hand LibRaw an uncompressed NEF
+      if (isJxlDng(buffer)) throw new Error('JXL_DNG');
+      const lensMD = readLensMeta(buffer);
       let input = buffer;
       if (!opts.thumbOnly && !opts.noFast) { const fast = nikonFastRepack(buffer); if (fast) { input = fast; out.fastPath = 'nikon-lossless'; out.timings.fastDecode = performance.now() - t0; } }
       const lr = M._libraw_init(0);
@@ -465,6 +476,7 @@ self.onmessage = async (e) => {
       const inPtr = M._malloc(inLen);
       if (!inPtr) throw new Error('記憶體不足，無法載入檔案');
       M.HEAPU8.set(new Uint8Array(input), inPtr); input = null;
+      buffer = null; e.data.buffer = null; // the file now lives in the wasm heap; let the JS copy be collected (48 MP ProRAW is ~100 MB)
       try {
         chk(M._libraw_open_buffer(lr, inPtr, inLen), 'open');
         out.timings.open = performance.now() - t0;
@@ -475,7 +487,7 @@ self.onmessage = async (e) => {
           camMul: [0, 1, 2, 3].map(i => M._libraw_get_cam_mul(lr, i)), preMul: [0, 1, 2, 3].map(i => M._libraw_get_pre_mul(lr, i)),
           isFoveon: !!M._libraw_get_is_foveon(lr)
         });
-        out.lensMD = readLensMeta(buffer);
+        out.lensMD = lensMD;
         // Embedded preview JPEG (fast path for instant display)
         if (opts.wantThumb) {
           const t = performance.now();
@@ -515,20 +527,50 @@ self.onmessage = async (e) => {
         post({ id, progress: opts.half ? '產生預覽…' : '去馬賽克（全尺寸）…' });
         chk(M._libraw_dcraw_process(lr), 'process');
         out.timings.process = performance.now() - t; t = performance.now();
-        const ep = M._malloc(4);
-        const img = M._libraw_dcraw_make_mem_image(lr, ep);
-        const ec = new Int32Array(M.HEAPU8.buffer, ep, 1)[0];
-        M._free(ep);
-        if (!img) chk(ec || -1, 'make_mem_image');
-        const v = new DataView(M.HEAPU8.buffer);
-        const h = v.getUint16(img + 4, true), w = v.getUint16(img + 6, true), c = v.getUint16(img + 8, true), bits = v.getUint16(img + 10, true), ds = v.getUint32(img + 12, true);
-        if (c !== 3 || bits !== 16) throw new Error('unexpected output ' + c + 'ch/' + bits + 'bit');
-        // Copy out of the wasm heap (owned buffer, transferable)
-        const data = new Uint16Array(ds / 2);
-        data.set(new Uint16Array(M.HEAPU8.buffer, img + 16, ds / 2));
-        M._libraw_dcraw_clear_mem(img);
+        // Read LibRaw's processed image (imgdata.image, ushort[4] per pixel; the first field of libraw_data_t) directly instead of
+        // dcraw_make_mem_image: that call allocates another full-size copy (290 MB for a 48 MP ProRAW). With linear gamma,
+        // 16-bit output and no auto-brightening its tone curve is the identity, so only the flip has to be reproduced here.
+        // half_size only shrinks Bayer/X-Trans data; linear DNGs (Apple ProRAW etc.) come back full size and are box-downsampled 2x2.
+        const iw = M._libraw_get_iwidth(lr), ih = M._libraw_get_iheight(lr), flip = M._libraw_get_flip(lr) & 7;
+        const ip = new DataView(M.HEAPU8.buffer).getUint32(lr, true);
+        if (!ip || !iw || !ih) throw new Error('no processed image');
+        const w = (flip & 4) ? ih : iw, h = (flip & 4) ? iw : ih;
+        const fw = (out.meta.flip & 4) ? out.meta.height : out.meta.width;
+        const fullOut = opts.half && Math.abs(w - fw) <= 2;
+        const down = fullOut && w >= 64 && h >= 64;
+        const ow = down ? w >> 1 : w, oh = down ? h >> 1 : h;
+        let data;
+        if (opts.memImage) { // reference path (tests only)
+          const ep = M._malloc(4); const img = M._libraw_dcraw_make_mem_image(lr, ep); const ec = new Int32Array(M.HEAPU8.buffer, ep, 1)[0]; M._free(ep);
+          if (!img) chk(ec || -1, 'make_mem_image');
+          const ds = new DataView(M.HEAPU8.buffer).getUint32(img + 12, true); data = new Uint16Array(ds / 2); data.set(new Uint16Array(M.HEAPU8.buffer, img + 16, ds / 2)); M._libraw_dcraw_clear_mem(img);
+        } else {
+          const src = new Uint16Array(M.HEAPU8.buffer, ip, iw * ih * 4);
+          // output pixel (r, c) reads source pixel base + r*dr + c*dc (LibRaw flip_index: swap, then mirror rows/cols)
+          const base = ((flip & 2) ? (ih - 1) * iw : 0) + ((flip & 1) ? iw - 1 : 0);
+          const rowStep = (flip & 2) ? -iw : iw, colStep = (flip & 1) ? -1 : 1;
+          const dr = ((flip & 4) ? colStep : rowStep) * 4, dc = ((flip & 4) ? rowStep : colStep) * 4;
+          data = new Uint16Array(ow * oh * 3);
+          if (down) {
+            for (let y = 0, o = 0; y < oh; y++) {
+              let s0 = base * 4 + 2 * y * dr;
+              for (let x = 0; x < ow; x++, o += 3, s0 += 2 * dc) {
+                const s1 = s0 + dc, s2 = s0 + dr, s3 = s2 + dc;
+                data[o] = (src[s0] + src[s1] + src[s2] + src[s3] + 2) >> 2;
+                data[o + 1] = (src[s0 + 1] + src[s1 + 1] + src[s2 + 1] + src[s3 + 1] + 2) >> 2;
+                data[o + 2] = (src[s0 + 2] + src[s1 + 2] + src[s2 + 2] + src[s3 + 2] + 2) >> 2;
+              }
+            }
+            out.linearDownsampled = true;
+          } else {
+            for (let y = 0, o = 0; y < oh; y++) {
+              let si = base * 4 + y * dr;
+              for (let x = 0; x < ow; x++, o += 3, si += dc) { data[o] = src[si]; data[o + 1] = src[si + 1]; data[o + 2] = src[si + 2]; }
+            }
+          }
+        }
         out.timings.copy = performance.now() - t;
-        out.width = w; out.height = h; out.data = data;
+        out.width = opts.memImage ? w : ow; out.height = opts.memImage ? h : oh; out.data = data; out.scale = opts.half && !(fullOut && !down) ? 2 : 1;
         out.timings.total = performance.now() - t0;
         out.heapMB = M.HEAPU8.length / 1048576;
         const tr = [data.buffer]; if (out.thumb) tr.push(out.thumb.buffer);
@@ -1646,6 +1688,123 @@ class Renderer {
 }
 
 
+// ===== imgdecode.js =====
+// Non-RAW photos (JPEG / HEIC / PNG / WebP / AVIF / TIFF): decoded by the browser itself, converted to the same
+// 16-bit linear-sRGB RGB buffer that the LibRaw worker produces, so every edit tool works the same way.
+// The browser applies EXIF orientation and converts wide-gamut (Display P3) photos to sRGB while drawing.
+const IMG_EXT = /\.(jpe?g|jfif|png|webp|avif|heic|heif|gif|bmp|tiff?)$/i;
+// iOS canvases are limited to about 16.7 megapixels, so large photos are rasterised in horizontal strips.
+const CANVAS_MAX_AREA = 16000000;
+const SRGB_TO_LIN16 = (() => { const t = new Uint16Array(256); for (let i = 0; i < 256; i++) { const c = i / 255; t[i] = Math.round((c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * 65535); } return t; })();
+
+// true when the file should be decoded by the browser instead of LibRaw
+async function isBrowserImage(file, rawExt) {
+  if (rawExt.test(file.name)) return false;
+  if (IMG_EXT.test(file.name)) return true;
+  if (/^image\//.test(file.type || '')) return true;
+  try {
+    const b = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    const s = (o, n) => String.fromCharCode(...b.subarray(o, o + n));
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true;            // JPEG
+    if (s(1, 3) === 'PNG') return true;                                         // PNG
+    if (s(0, 4) === 'RIFF' && s(8, 4) === 'WEBP') return true;                  // WebP
+    if (s(4, 4) === 'ftyp' && /^(heic|heix|hevc|mif1|msf1|avif|avis)$/.test(s(8, 4))) return true; // HEIF / AVIF
+  } catch { }
+  return false;
+}
+
+// Minimal EXIF reader: finds the "Exif\0\0" TIFF block (JPEG APP1, or the Exif item inside HEIC) in the first 1 MB.
+async function readExifMeta(file) {
+  const meta = {};
+  try {
+    const buf = await file.slice(0, Math.min(file.size, 1 << 20)).arrayBuffer(); const u8 = new Uint8Array(buf);
+    let p = -1;
+    for (let i = 0; i < u8.length - 10; i++) if (u8[i] === 0x45 && u8[i + 1] === 0x78 && u8[i + 2] === 0x69 && u8[i + 3] === 0x66 && u8[i + 4] === 0 && u8[i + 5] === 0 && (u8[i + 6] === 0x49 || u8[i + 6] === 0x4d)) { p = i + 6; break; }
+    if (p < 0) return meta;
+    const dv = new DataView(buf, p); const n = buf.byteLength - p; const le = dv.getUint16(0) === 0x4949;
+    const u16 = o => dv.getUint16(o, le), u32 = o => dv.getUint32(o, le);
+    const SZ = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8];
+    const readIFD = off => {
+      const tags = {}; if (off + 2 > n) return tags; const cnt = u16(off); if (cnt > 500) return tags;
+      for (let i = 0; i < cnt; i++) {
+        const e = off + 2 + i * 12; if (e + 12 > n) break;
+        const tag = u16(e), type = u16(e + 2), count = u32(e + 4), bytes = (SZ[type] || 1) * count, vo = bytes <= 4 ? e + 8 : u32(e + 8);
+        if (vo + bytes > n) continue;
+        if (type === 2) { let s = ''; for (let k = 0; k < count && dv.getUint8(vo + k); k++) s += String.fromCharCode(dv.getUint8(vo + k)); tags[tag] = s.trim(); }
+        else if (type === 3) tags[tag] = u16(vo);
+        else if (type === 4) tags[tag] = u32(vo);
+        else if (type === 5 || type === 10) { const d = u32(vo + 4); tags[tag] = d ? (type === 10 ? dv.getInt32(vo, le) : u32(vo)) / d : 0; }
+      }
+      return tags;
+    };
+    const t0 = readIFD(u32(4)); const ex = t0[0x8769] ? readIFD(t0[0x8769]) : {};
+    if (t0[0x10f]) meta.make = t0[0x10f]; if (t0[0x110]) meta.model = t0[0x110];
+    if (ex[0x829a]) meta.shutter = ex[0x829a]; if (ex[0x829d]) meta.aperture = ex[0x829d];
+    if (ex[0x8827]) meta.iso = ex[0x8827]; if (ex[0x920a]) meta.focal = ex[0x920a];
+    if (ex[0xa434]) meta.lens = ex[0xa434];
+    const dt = ex[0x9003] || t0[0x132];
+    const m = dt && /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(dt);
+    if (m) meta.timestamp = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() / 1000;
+  } catch { }
+  return meta;
+}
+
+async function loadImageElement(file) {
+  const url = URL.createObjectURL(file); const img = new Image(); img.decoding = 'async';
+  try { img.src = url; await img.decode(); }
+  catch {
+    URL.revokeObjectURL(url);
+    const heic = /\.(heic|heif)$/i.test(file.name) || /hei[cf]/.test(file.type || '');
+    throw new Error(heic ? '這個瀏覽器無法解碼 HEIC（Safari 可以；Chrome／Android 請先轉成 JPEG）' : '這個瀏覽器無法解碼這個圖片格式');
+  }
+  return { img, url };
+}
+
+// Rasterise img at tw×th into 16-bit linear RGB, strip by strip to stay under the canvas area limit.
+async function rasterizeLinear(img, tw, th, onProgress) {
+  const out = new Uint16Array(tw * th * 3);
+  const sh = Math.max(1, Math.min(th, Math.floor(CANVAS_MAX_AREA / tw), 4096));
+  const c = document.createElement('canvas'); c.width = tw; c.height = sh;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  for (let y = 0; y < th; y += sh) {
+    const h = Math.min(sh, th - y);
+    g.clearRect(0, 0, tw, sh); g.drawImage(img, 0, -y, tw, th);
+    const d = g.getImageData(0, 0, tw, h).data;
+    for (let i = 0, o = y * tw * 3, n = tw * h * 4; i < n; i += 4, o += 3) { out[o] = SRGB_TO_LIN16[d[i]]; out[o + 1] = SRGB_TO_LIN16[d[i + 1]]; out[o + 2] = SRGB_TO_LIN16[d[i + 2]]; }
+    if (onProgress && th > sh) { onProgress(`解碼圖片… ${Math.round(Math.min(1, (y + h) / th) * 100)}%`); await new Promise(r => setTimeout(r, 0)); }
+  }
+  c.width = c.height = 0; // release the canvas backing store right away (matters on iOS)
+  return out;
+}
+
+function thumbFromImage(img, maxW = 240) {
+  const W = img.naturalWidth, H = img.naturalHeight, s = Math.min(1, maxW / W);
+  const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(W * s)); c.height = Math.max(1, Math.round(H * s));
+  const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, c.width, c.height);
+  const url = c.toDataURL('image/jpeg', 0.7); c.width = c.height = 0; return url;
+}
+
+// Same result shape as the LibRaw worker: {data, width, height, scale, meta, lensMD, timings}
+// opts.half: preview decode (half size for photos above ~6 MP), opts.thumbOnly: metadata + thumbnail only.
+async function decodeBrowserImage(file, opts = {}, onProgress) {
+  const t0 = performance.now();
+  const [meta, { img, url }] = await Promise.all([readExifMeta(file), loadImageElement(file)]);
+  try {
+    const W = img.naturalWidth, H = img.naturalHeight;
+    if (!W || !H) throw new Error('圖片尺寸無效');
+    Object.assign(meta, { width: W, height: H, flip: 0, kind: 'image', format: (/\.([a-z0-9]+)$/i.exec(file.name) || [, ''])[1].toUpperCase() || (file.type || '').replace('image/', '').toUpperCase() });
+    if (opts.thumbOnly) return { meta, lensMD: null, thumbURL: thumbFromImage(img), timings: { total: performance.now() - t0 } };
+    const scale = opts.half && W * H > 6e6 ? 2 : 1;
+    const tw = Math.max(1, Math.round(W / scale)), th = Math.max(1, Math.round(H / scale));
+    onProgress && onProgress('解碼圖片…');
+    const data = await rasterizeLinear(img, tw, th, onProgress);
+    const r = { data, width: tw, height: th, scale, meta, lensMD: null, timings: { total: performance.now() - t0 } };
+    if (opts.wantThumb) r.thumbURL = thumbFromImage(img);
+    return r;
+  } finally { URL.revokeObjectURL(url); }
+}
+
 // ===== app.js =====
 // ===== RAW Editor main program =====
 const $ = s => document.querySelector(s);
@@ -1690,6 +1849,8 @@ class Decoder {
 }
 let decoder = new Decoder();
 async function decodeFile(file, opts, onProgress) {
+  if (file._isImage === undefined) file._isImage = await isBrowserImage(file, RAW_EXT);
+  if (file._isImage) return decodeBrowserImage(file, opts, onProgress);
   // fresh worker per decode so the wasm heap is released afterwards (important on phones)
   const d = new Decoder(); await d.init();
   try {
@@ -1698,11 +1859,21 @@ async function decodeFile(file, opts, onProgress) {
   } finally { d.terminate(); }
 }
 
+function friendlyError(e) {
+  const m = (e && e.message) || String(e);
+  if (m.includes('JXL_DNG')) return '這張 ProRAW 用 JPEG-XL 壓縮，瀏覽器版 LibRaw 解不開。請到 iPhone「設定 > 相機 > 格式 > ProRAW 格式」改選「JPEG」後再拍。';
+  if (/Unsupported file format|not RAW file/i.test(m)) return '不是支援的 RAW 或圖片格式（' + m + '）';
+  return m;
+}
+
 // ---------- state ----------
 const images = []; let cur = -1;
 const state = { zoom: 1, panX: 0, panY: 0, compare: 0, split: 0.5, cropMode: false, tab: 'light', hq: false, hist: true, clipboard: null, previewData: null, busy: false,
   maskSel: -1, showMask: false, tool: { size: 20, feather: 60, flow: 100, erase: false }, cursor: null };
 const TOOL_DEFAULTS = { size: 20, feather: 60, flow: 100 };
+// JPEG/HEIC/PNG were already sharpened and denoised in the camera, so they start without the RAW capture sharpening / colour NR.
+const IMG_DEFAULTS = Object.assign(clone(DEFAULTS), { sharpen: 0, nrColor: 0 });
+const defaultsFor = imOrFile => { const f = imOrFile && (imOrFile.file || imOrFile); return f && f._isImage ? IMG_DEFAULTS : DEFAULTS; };
 let renderer; try { renderer = new Renderer($('#view')); } catch (e) { $('#drop').innerHTML = '<h1>無法啟動</h1><p>' + e.message + '</p>'; throw e; }
 const curveEd = new CurveEditor(document.createElement('canvas'), () => { onCurveChange(); });
 const CUR = () => images[cur];
@@ -1849,7 +2020,7 @@ const setPath = (o, path, v) => { const ks = path.split('.'); const last = ks.po
 function sliderTarget(path) {
   if (path.startsWith('M.')) return [activeMask(), path.slice(2), MASK_DEFAULTS];
   if (path.startsWith('T.')) return [state.tool, path.slice(2), TOOL_DEFAULTS];
-  return [CUR() ? CUR().params : null, path, DEFAULTS];
+  return [CUR() ? CUR().params : null, path, defaultsFor(CUR())];
 }
 function makeSlider(path, label, min, max, step, format, grad) {
   const [, sub0, defs] = sliderTarget(path); const def = getPath(defs, sub0);
@@ -1972,7 +2143,7 @@ function selectTab(id) {
   else drawOverlay(); // handles / crop frame only
   fitCanvas();
 }
-function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(DEFAULTS, k)); refreshAll(); commit(); }
+function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
 function refreshAll() { refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) curveEd.setCurves(CUR().params.curves); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
@@ -2123,7 +2294,7 @@ function buildPresetPanel(sec) {
   renderPresetGrid();
 }
 // the amount slider lives outside params: emulate a param path on a side object
-Object.defineProperty(DEFAULTS, '_presetAmount', { value: 100, enumerable: false });
+for (const d of [DEFAULTS, IMG_DEFAULTS]) Object.defineProperty(d, '_presetAmount', { value: 100, enumerable: false });
 function renderPresetGrid() {
   const grid = presetUI.grid; if (!grid) return; grid.innerHTML = '';
   PRESETS.forEach((p, i) => grid.append(el('button', { 'data-id': 'b' + i, onclick: () => applyPresetUI(p, 'b' + i) }, p.name, el('small', {}, p.en))));
@@ -2149,7 +2320,7 @@ function commit() {
   const im = CUR(); if (!im) return; const snap = JSON.stringify(im.params);
   if (im.hist[im.hi] === snap) return;
   im.hist = im.hist.slice(0, im.hi + 1); im.hist.push(snap); if (im.hist.length > 60) im.hist.shift(); im.hi = im.hist.length - 1;
-  im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(defaultParams()); updateUndoButtons(); saveEdits(im); updateFilmstrip();
+  im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(clone(defaultsFor(im))); updateUndoButtons(); saveEdits(im); updateFilmstrip();
 }
 function stripAmount(p) { const c = clone(p); delete c._presetAmount; return c; }
 function undo() { const im = CUR(); if (!im || im.hi <= 0) return; im.hi--; im.params = JSON.parse(im.hist[im.hi]); im.presetId = null; refreshAll(); updateUndoButtons(); saveEdits(im); }
@@ -2460,14 +2631,24 @@ cmpBtn.addEventListener('pointerup', cmpUp); cmpBtn.addEventListener('pointercan
 cmpBtn.addEventListener('dblclick', () => { if (!CUR()) return; ensureBefore(); state.compare = state.compare === 2 ? 0 : 2; cmpBtn.classList.toggle('on', state.compare === 2); draw(); toast(state.compare === 2 ? '分割檢視：左原圖 / 右編輯。拖曳分隔線可移動。' : '離開分割檢視'); });
 
 // ---------- files ----------
+if (IS_IOS || IS_TOUCH) $('#fileInput').removeAttribute('accept');
+if (IS_IOS) $('#iosHint').style.display = '';
 $('#btnOpen').onclick = $('#btnOpen2').onclick = () => $('#fileInput').click();
 $('#fileInput').addEventListener('change', e => { addFiles([...e.target.files]); e.target.value = ''; });
 const vw = $('#viewwrap');
 vw.addEventListener('dragover', e => { e.preventDefault(); }); vw.addEventListener('drop', e => { e.preventDefault(); addFiles([...e.dataTransfer.files]); });
 const RAW_EXT = /\.(arw|srf|sr2|nef|nrw|raf|dng|cr2|cr3|crw|orf|rw2|pef|srw|x3f|3fr|fff|iiq|rwl|raw|mrw|erf|kdc|dcr|mos|mef)$/i;
 async function addFiles(files) {
-  const jsons = files.filter(f => /\.json$/i.test(f.name)); const raws = files.filter(f => RAW_EXT.test(f.name) || /\.jpe?g$/i.test(f.name));
-  if (!raws.length && !jsons.length) { toast('沒有可開啟的 RAW 檔'); return; }
+  const jsons = files.filter(f => /\.json$/i.test(f.name)); const raws = []; let skipped = 0;
+  for (const f of files) {
+    if (/\.json$/i.test(f.name)) continue;
+    f._isImage = await isBrowserImage(f, RAW_EXT);
+    if (f._isImage || RAW_EXT.test(f.name)) raws.push(f);
+    else if (/^(video|audio|text)\//.test(f.type || '') || /\.(mov|mp4|m4v|avi|pdf|zip|txt|aae|xmp|nksc)$/i.test(f.name)) skipped++;
+    else raws.push(f); // unknown extension: let LibRaw try
+  }
+  if (skipped) toast(`已略過 ${skipped} 個不支援的檔案（影片、文件等）`);
+  if (!raws.length && !jsons.length) { if (!skipped) toast('沒有可開啟的照片'); return; }
   const sidecars = new Map(); for (const j of jsons) { try { sidecars.set(j.name.replace(/\.json$/i, '').toLowerCase(), JSON.parse(await j.text())); } catch { } }
   // a lone json: apply to current image
   if (!raws.length && jsons.length && CUR()) { const j = [...sidecars.values()][0]; applyLoadedSettings(j); return; }
@@ -2477,7 +2658,7 @@ async function addFiles(files) {
     const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
     const side = sidecars.get(base) || sidecars.get(f.name.toLowerCase());
     const saved = loadEdits(imgKey(f));
-    const params = side ? mergeParams(side.params || side) : (saved || defaultParams());
+    const params = side ? mergeParams(side.params || side) : (saved || clone(defaultsFor(f)));
     const im = { id: Math.random().toString(36).slice(2), file: f, name: f.name, key: imgKey(f), params, hist: [JSON.stringify(params)], hi: 0, edited: !!(side || saved), meta: null, thumbUrl: null, fullW: 0, fullH: 0 };
     images.push(im); if (firstNew < 0) firstNew = images.length - 1;
     makeThumb(im);
@@ -2498,7 +2679,8 @@ async function makeThumbNow(im) {
   try {
     const r = await decodeFile(im.file, { wantThumb: true, thumbOnly: true });
     im.meta = r.meta; if (r.lensMD !== undefined) im.lensMD = r.lensMD;
-    if (r.thumb) { const blob = new Blob([r.thumb], { type: 'image/jpeg' }); im.thumbBlobUrl = URL.createObjectURL(blob); try { const bm = await createImageBitmap(blob, { resizeWidth: 240, resizeQuality: 'medium' }); const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0); im.thumbUrl = c.toDataURL('image/jpeg', 0.7); bm.close(); } catch { im.thumbUrl = im.thumbBlobUrl; } }
+    if (r.thumbURL) { im.thumbUrl = r.thumbURL; if (!im.thumbBlobUrl) im.thumbBlobUrl = URL.createObjectURL(im.file); }
+    else if (r.thumb) { const blob = new Blob([r.thumb], { type: 'image/jpeg' }); im.thumbBlobUrl = URL.createObjectURL(blob); try { const bm = await createImageBitmap(blob, { resizeWidth: 240, resizeQuality: 'medium' }); const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0); im.thumbUrl = c.toDataURL('image/jpeg', 0.7); bm.close(); } catch { im.thumbUrl = im.thumbBlobUrl; } }
     updateFilmstrip(); if (CUR() === im) showInfo();
   } catch (e) { console.warn('thumb', e); }
 }
@@ -2514,17 +2696,20 @@ async function selectImage(i) {
   try {
     const r = await decodeFile(im.file, { half: true, wantThumb: !im.thumbBlobUrl }, p => { if (seq === loadSeq) status(p); });
     if (seq !== loadSeq) return; // user moved on
-    im.meta = r.meta; im.lensMD = r.lensMD ?? null; im.previewW = r.width; im.previewH = r.height; im.previewScale = 2; im.fullW = r.width * 2; im.fullH = r.height * 2;
-    if (im.meta && im.meta.width && Math.abs(im.meta.width - im.fullW) <= 2) { im.fullW = im.meta.width; im.fullH = im.meta.height; }
-    state.previewData = { data: r.data, w: r.width, h: r.height, scale: 2, imId: im.id };
-    renderer.setSource(r.data, r.width, r.height, 2, im.fullW, im.fullH);
+    const sc = r.scale || 2;
+    im.meta = r.meta; im.lensMD = r.lensMD ?? null; im.previewW = r.width; im.previewH = r.height; im.previewScale = sc; im.fullW = r.width * sc; im.fullH = r.height * sc;
+    if (im.meta && im.meta.width) { const mw = (im.meta.flip & 4) ? im.meta.height : im.meta.width, mh = (im.meta.flip & 4) ? im.meta.width : im.meta.height; if (Math.abs(mw - im.fullW) <= 2 && Math.abs(mh - im.fullH) <= 2) { im.fullW = mw; im.fullH = mh; } }
+    state.previewData = { data: r.data, w: r.width, h: r.height, scale: sc, imId: im.id };
+    renderer.setSource(r.data, r.width, r.height, sc, im.fullW, im.fullH);
+    if (r.thumbURL && !im.thumbUrl) { im.thumbUrl = r.thumbURL; updateFilmstrip(); }
     if (r.thumb && !im.thumbBlobUrl) { im.thumbBlobUrl = URL.createObjectURL(new Blob([r.thumb], { type: 'image/jpeg' })); im.thumbUrl = im.thumbBlobUrl; updateFilmstrip(); }
     ti.style.display = 'none';
     curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveEd.lutRGBA());
     fitCanvas(); fitView(); refreshLensUI(); refreshLocalUI(); requestRender(false); showInfo(); $('#btnExport').disabled = false;
     $('#finfo').textContent = `${im.fullW}×${im.fullH} · 預覽 ${r.width}×${r.height} · ${(r.timings.total / 1000).toFixed(1)}s`;
     status('');
-  } catch (e) { if (seq === loadSeq) { status(''); toast('無法解碼：' + e.message, 5000); ti.style.display = 'none'; } console.error(e); }
+    if (im.file._isImage && IS_IOS && /\.jpe?g$/i.test(im.name) && !selectImage.iosHint) { selectImage.iosHint = true; toast('提示：從「照片圖庫」選的照片，iPhone 一律轉成 JPEG 給網頁，RAW 也會被轉。要修 RAW 請按＋選「選擇檔案」。', 8000); }
+  } catch (e) { if (seq === loadSeq) { status(''); toast('無法開啟：' + friendlyError(e), 8000); ti.style.display = 'none'; } console.error(e); }
 }
 function updateFilmstrip() {
   const fs = $('#filmstrip'); fs.innerHTML = '';
@@ -2537,7 +2722,7 @@ function showInfo() {
   const im = CUR(); const box = $('#infobox'); if (!im) { box.textContent = '尚未開啟照片。'; return; } const m = im.meta || {};
   const sh = m.shutter ? (m.shutter >= 1 ? m.shutter.toFixed(1) + 's' : '1/' + Math.round(1 / m.shutter) + 's') : '';
   const dt = m.timestamp ? new Date(m.timestamp * 1000).toLocaleString() : '';
-  box.innerHTML = `<b>${im.name}</b><br>${[m.make, m.model].filter(Boolean).join(' ')}<br>${m.lens || ''}<br>${[m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + m.aperture.toFixed(1) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean).join(' · ')}<br>${dt}<br>${im.fullW ? `尺寸 ${im.fullW}×${im.fullH}` : ''} ${m.filters === 9 ? '· X-Trans' : m.filters ? '· Bayer' : ''}<br><span style="font-size:11px">檔案大小 ${(im.file.size / 1048576).toFixed(1)} MB</span>`;
+  box.innerHTML = `<b>${im.name}</b><br>${[m.make, m.model].filter(Boolean).join(' ')}<br>${m.lens || ''}<br>${[m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + m.aperture.toFixed(1) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean).join(' · ')}<br>${dt}<br>${im.fullW ? `尺寸 ${im.fullW}×${im.fullH}` : ''} ${m.kind === 'image' ? '· ' + m.format : m.filters === 9 ? '· X-Trans' : m.filters ? '· Bayer' : m.colors === 3 ? '· 線性 DNG' : ''}<br><span style="font-size:11px">檔案大小 ${(im.file.size / 1048576).toFixed(1)} MB</span>`;
 }
 
 // ---------- settings json / clipboard ----------
@@ -2552,7 +2737,7 @@ $('#mLoadJson').onclick = () => { const inp = el('input', { type: 'file', accept
 $('#mCopy').onclick = () => { const im = CUR(); if (!im) return; state.clipboard = stripAmount(im.params); toast('已複製設定'); };
 $('#mPaste').onclick = () => { const im = CUR(); if (!im || !state.clipboard) return; const geo = im.params.geo; im.params = mergeParams(state.clipboard); im.params.geo = geo; im.presetId = null; refreshAll(); commit(); toast('已貼上設定（不含裁切）'); };
 $('#mPasteAll').onclick = () => { if (!state.clipboard) { toast('請先複製設定'); return; } for (const im of images) { const geo = im.params.geo; im.params = mergeParams(state.clipboard); im.params.geo = geo; im.hist = [JSON.stringify(im.params)]; im.hi = 0; im.edited = true; saveEdits(im); } refreshAll(); toast('已套用到 ' + images.length + ' 張'); };
-$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = defaultParams(); im.presetId = null; refreshAll(); fitView(); commit(); };
+$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = clone(defaultsFor(im)); im.presetId = null; refreshAll(); fitView(); commit(); };
 $('#mExportPresets').onclick = () => download(new Blob([JSON.stringify({ app: 'RAW Editor', presets: userPresets }, null, 1)], { type: 'application/json' }), 'raw-editor-presets.json');
 $('#mImportPresets').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { const j = JSON.parse(await inp.files[0].text()); const list = j.presets || (Array.isArray(j) ? j : null); if (!list) throw new Error('格式不符'); for (const p of list) if (p && p.name && p.p) userPresets.push(p); saveUserPresets(); renderPresetGrid(); toast('已匯入 ' + list.length + ' 個預設集'); } catch (e) { toast('匯入失敗：' + e.message); } }; inp.click(); };
 $('#optHQ').checked = state.hq; $('#optHQ').onchange = e => { state.hq = e.target.checked; try { localStorage.setItem('rawedit:hq', state.hq ? '1' : '0'); } catch { } };
@@ -2601,7 +2786,7 @@ $('#expGo').onclick = async () => {
       $('#expMsg').append(el('div', { class: 'hint' }, `完成：${results[0].name}（${(results[0].blob.size / 1048576).toFixed(1)} MB）`), row);
     } else if (results.length) $('#expMsg').textContent = `完成 ${results.length} 張，共 ${(results.reduce((a, r) => a + r.blob.size, 0) / 1048576).toFixed(1)} MB`;
     else if (state.cancelExport) $('#expMsg').textContent = '已取消';
-  } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + e.message; }
+  } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + friendlyError(e); }
   finally { state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
 };
 async function exportImage(im, o, prog) {
@@ -2611,7 +2796,7 @@ async function exportImage(im, o, prog) {
   // choose decode scale: half-size is a true box downsample, good when the target is at most half of the full output
   let src;
   if (target <= longEdge / 2 && state.previewData && state.previewData.imId === im.id) { src = state.previewData; }
-  else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 2 }; }
+  else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: r.scale || 2 }; }
   else { prog('全解析度解碼，請稍候…', 0.02); const q = o.demosaic === 'auto' ? undefined : +o.demosaic; const r = await decodeFile(im.file, { half: false, quality: q }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 1 }; }
   if (state.cancelExport) return null;
   const fullW = src.w * src.scale, fullH = src.h * src.scale;

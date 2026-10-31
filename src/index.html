@@ -14,7 +14,7 @@
 <div id="app">
   <div id="topbar">
     <button id="btnOpen" class="icon" title="開啟 RAW">＋</button>
-    <input id="fileInput" type="file" multiple accept=".arw,.nef,.nrw,.raf,.dng,.cr2,.cr3,.orf,.rw2,.pef,.srw,.x3f,.3fr,.iiq,.rwl,.raw,.jpg,.jpeg,.json" style="display:none">
+    <input id="fileInput" type="file" multiple accept=".arw,.nef,.nrw,.raf,.dng,.cr2,.cr3,.orf,.rw2,.pef,.srw,.x3f,.3fr,.iiq,.rwl,.raw,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif,.tif,.tiff,.json" style="display:none">
     <div class="title"><b id="fname">RAW Editor</b> <span id="finfo"></span></div>
     <button id="btnUndo" class="icon" title="復原 (Ctrl+Z)" disabled>↶</button>
     <button id="btnRedo" class="icon" title="重做 (Ctrl+Shift+Z)" disabled>↷</button>
@@ -33,8 +33,9 @@
     <div id="status"></div>
     <div id="drop">
       <h1>RAW Editor</h1>
-      <p>純瀏覽器 RAW 修圖。支援 Sony ARW、Nikon NEF、Fujifilm RAF（含 X-Trans）、Ricoh DNG 等 1200+ 機型。檔案不會離開你的裝置。</p>
-      <button class="big primary" id="btnOpen2">選擇 RAW 檔案</button>
+      <p>純瀏覽器 RAW 修圖。支援 Sony ARW、Nikon NEF、Fujifilm RAF（含 X-Trans）、Ricoh DNG、iPhone ProRAW 等 1200+ 機型，也能修 JPEG／HEIC／PNG。檔案不會離開你的裝置。</p>
+      <button class="big primary" id="btnOpen2">選擇照片</button>
+      <p class="hint" id="iosHint" style="display:none">iPhone：RAW 檔請選「選擇檔案」。「照片圖庫」只會給 JPEG。</p>
       <p>桌機可直接把檔案拖進來。同名的 .json 設定檔會一併套用。</p>
       <p id="caps" class="hint"></p>
     </div>

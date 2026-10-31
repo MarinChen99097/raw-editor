@@ -4,7 +4,11 @@
 
 ## 支援格式
 
-LibRaw 支援的 1274 款相機都能開，實際測過：Sony ARW（A7 III）、Nikon NEF（Z 6、Z5 II 無損壓縮）、Fujifilm RAF（X-T30、X-T5，X-Trans）、Ricoh DNG（GR III）。副檔名清單：ARW/SRF/SR2、NEF/NRW、RAF、DNG、CR2/CR3、ORF、RW2、PEF、SRW、X3F、3FR、IIQ…。
+LibRaw 支援的 1274 款相機都能開，實際測過：Sony ARW（A7 III）、Nikon NEF（Z 6、Z5 II 無損壓縮）、Fujifilm RAF（X-T30、X-T5，X-Trans）、Ricoh DNG（GR III）、iPhone DNG（XS 第三方 App、12 Pro 與 15 Pro Max ProRAW，含 48MP）。副檔名清單：ARW/SRF/SR2、NEF/NRW、RAF、DNG、CR2/CR3、ORF、RW2、PEF、SRW、X3F、3FR、IIQ…。
+
+一般照片也能修：JPEG、HEIC（只有 Safari 能解）、PNG、WebP、AVIF。會依 EXIF 自動轉正並讀出拍攝資訊。這類照片的預設不套用 RAW 用的銳化與色彩降噪，所以不做調整時，匯出幾乎和原圖一樣。
+
+**不支援**：iPhone 16 Pro 以後可選的「JPEG-XL」壓縮 ProRAW。瀏覽器版 LibRaw 沒有內含 Adobe DNG SDK，開啟時會提示改設定（「設定 > 相機 > 格式 > ProRAW 格式」選「JPEG」）。
 
 ## 線上版（手機最方便）
 
@@ -26,6 +30,13 @@ LibRaw 支援的 1274 款相機都能開，實際測過：Sony ARW（A7 III）�
 iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接點開只會看到空白頁。可行的方式：
 - **最穩**：用上面的線上版網址，Safari 開一次後「加入主畫面」，之後離線也能用。
 - 或安裝一個能執行本機 HTML 的 App（例如 Documents by Readdle 的內建瀏覽器、Koder 等），用它開啟 `RawEditor.html`。
+
+**在 iPhone 開 RAW 要用「選擇檔案」**：按「＋」後跳出的選單裡：
+- **選擇檔案**：從「檔案」App 選，拿到的是原始檔，RAW（NEF、ARW、RAF、DNG、ProRAW…）都用這個。
+- **照片圖庫**：Safari 一律把照片轉成 JPEG 才交給網頁，RAW 也會被轉，網頁沒辦法改變這點。修一般照片可以用它。
+- 照片 App 裡的 ProRAW 要先存到「檔案」：分享時點上方「選項」打開「所有照片資料」，再選「儲存到檔案」。
+
+48MP ProRAW 解碼時大約要用 1 GB 記憶體。如果 Safari 重新載入頁面，請關掉其他分頁，或改拍 12MP ProRAW。
 
 ## 功能
 
