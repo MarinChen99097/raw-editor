@@ -8,7 +8,7 @@ LibRaw 支援的 1274 款相機都能開，實際測過：Sony ARW（A7 III）�
 
 ## 線上版（手機最方便）
 
-在 repo 的 Settings → Pages 選 `main` 分支、根目錄後，網址會是 **https://marinchen99097.github.io/raw-editor/**（GitHub 免費方案需要 repo 為公開）。
+網址：**https://marinchen99097.github.io/raw-editor/**（GitHub Pages，從 `main` 分支根目錄自動發佈）。
 
 用手機瀏覽器打開這個網址即可使用，iPhone 與 Android 都可以。照片只在你的手機裡處理，不會上傳。開過一次後可用「加入主畫面」，之後沒有網路也能用。
 
@@ -24,7 +24,7 @@ LibRaw 支援的 1274 款相機都能開，實際測過：Sony ARW（A7 III）�
 
 ### iPhone / iPad
 iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接點開只會看到空白頁。可行的方式：
-- **最穩**：開啟 GitHub Pages 後用上面的線上版網址，Safari 開一次後「加入主畫面」，之後離線也能用。
+- **最穩**：用上面的線上版網址，Safari 開一次後「加入主畫面」，之後離線也能用。
 - 或安裝一個能執行本機 HTML 的 App（例如 Documents by Readdle 的內建瀏覽器、Koder 等），用它開啟 `RawEditor.html`。
 
 ## 功能
