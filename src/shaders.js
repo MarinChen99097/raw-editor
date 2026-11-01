@@ -88,6 +88,14 @@ uniform sampler2D u_curve;      // 256x1 RGBA16F: r=RGB curve, g/b/a = R/G/B cur
 uniform sampler2D u_brush;      // brush masks, one per channel (normalised full-image coords)
 uniform highp sampler3D u_lut;  // film emulation 3D LUT, display-referred sRGB in and out
 uniform float u_lutAmt, u_lutN;  // strength 0..1, LUT size per axis
+uniform mat3  u_calib;          // camera calibration: primaries hue/saturation in linear RGB (white preserving)
+uniform float u_shadowTint;     // calibration shadow tint: -1 green .. +1 magenta
+uniform vec3  u_gradeG;         // colour grading, global wheel (oklab dL, a, b)
+uniform float u_gradeBlend;     // colour grading blending 0..1 (0.5 = default overlap)
+uniform vec2  u_vig2;           // vignette roundness (-1..1), highlight priority (0..1)
+uniform float u_grainRough;     // grain roughness 0..1
+uniform float u_sharpMask;      // sharpening edge mask 0..1
+uniform int   u_clipWarn;       // show clipped highlights (red) and shadows (blue)
 uniform vec2  u_outSize;
 uniform mat3  u_m;              // out pixel -> full-image pixel (lens-corrected space)
 uniform float u_exposure;       // linear multiplier
@@ -218,7 +226,9 @@ void main(){
     float La = (dot(fetchSrc(ci+ivec2(r,0)),LUMA)+dot(fetchSrc(ci-ivec2(r,0)),LUMA)+dot(fetchSrc(ci+ivec2(0,r)),LUMA)+dot(fetchSrc(ci-ivec2(0,r)),LUMA))*0.25;
     float Lt2 = (dot(fetchSrc(ci+ivec2(3,0)),LUMA)+dot(fetchSrc(ci-ivec2(3,0)),LUMA)+dot(fetchSrc(ci+ivec2(0,3)),LUMA)+dot(fetchSrc(ci-ivec2(0,3)),LUMA)
                +dot(fetchSrc(ci+ivec2(2,2)),LUMA)+dot(fetchSrc(ci-ivec2(2,2)),LUMA)+dot(fetchSrc(ci+ivec2(2,-2)),LUMA)+dot(fetchSrc(ci-ivec2(2,-2)),LUMA))*0.125;
-    float hp = (Lc-La)*shAmt*1.5 + (Lc-Lt2)*txAmt*1.2;
+    float km = 1.0; // sharpening mask: only edges get sharpened (smooth areas such as skin and sky are left alone)
+    if(u_sharpMask > 0.001){ float ed = abs(enc(Lc) - enc(La))*2.0 + abs(enc(Lc) - enc(Lt2)); km = smoothstep(u_sharpMask*0.05, u_sharpMask*0.05 + 0.02, ed); }
+    float hp = (Lc-La)*shAmt*1.5*km + (Lc-Lt2)*txAmt*1.2;
     float m = smoothstep(0.0, 0.01, abs(Lc-La)+abs(Lc-Lt2));
     c *= 1.0 + hp*m/max(Lc,0.002);
   }
@@ -249,6 +259,9 @@ void main(){
 
   // --- exposure & white balance ---
   c *= u_exposure * u_wb * lMul * lwb;
+  // --- camera calibration (primaries) + shadow tint ---
+  c = max(u_calib * c, 0.0);
+  if(abs(u_shadowTint) > 0.001){ float Ls = dot(c, LUMA); c.g *= 1.0 - u_shadowTint*0.3*(1.0 - smoothstep(0.0, 0.18, Ls)); }
 
   // --- dehaze (simple atmospheric model) ---
   float dehaze = clamp(u_dehaze + lDeh, -1.0, 1.0);
@@ -335,22 +348,29 @@ void main(){
   {
     float x = clamp(Ln, 0.0, 1.0);
     float b = u_gradeBalance*0.25;
-    float wS = 1.0 - smoothstep(0.0, 0.55 + b, x);
-    float wH = smoothstep(0.45 + b, 1.0, x);
+    float sp = 0.5 + u_gradeBlend;           // blending widens/narrows the overlap; 1.0 at the default 50
+    float eS = 0.55 + b, cS = eS*0.5, hS = eS*0.5*sp;
+    float wS = 1.0 - smoothstep(cS - hS, cS + hS, x);
+    float sH = 0.45 + b, cH = (sH + 1.0)*0.5, hH = (1.0 - sH)*0.5*sp;
+    float wH = smoothstep(cH - hH, cH + hH, x);
     float wM = max(0.0, 1.0 - wS - wH);
-    lab += wS*u_gradeS + wM*u_gradeM + wH*u_gradeH;
+    lab += wS*u_gradeS + wM*u_gradeM + wH*u_gradeH + u_gradeG;
   }
   c = oklab2lin(lab);
   c = max(c, 0.0);
 
   // --- vignette (creative, in output space) ---
   if(abs(u_vignette.x) > 0.001){
-    vec2 q = (v_uv - 0.5)*2.0; q.x *= u_outSize.x/max(u_outSize.y, 1.0); q /= max(u_outSize.x/max(u_outSize.y,1.0), 1.0);
-    float d = length(q)/1.41421356;
+    vec2 q = (v_uv - 0.5)*2.0; float asp = u_outSize.x/max(u_outSize.y, 1.0); float rnd = u_vig2.x, d;
+    if(rnd >= 0.0){ float s = mix(1.0, asp, rnd); q.x *= s; q /= max(s, 1.0); d = length(q)/1.41421356; } // 0 = follows the frame, 1 = circle
+    else { float n = 2.0 - rnd*6.0; vec2 a = abs(q); d = pow(pow(a.x, n) + pow(a.y, n), 1.0/n)/pow(2.0, 1.0/n); } // towards a rounded rectangle
     float mid = u_vignette.y, fe = max(u_vignette.z, 0.02);
     float v = smoothstep(mid - fe*0.7, mid + fe*0.7, d);
-    c *= u_vignette.x < 0.0 ? (1.0 + u_vignette.x*v*0.9) : 1.0;
-    if(u_vignette.x > 0.0) c = mix(c, vec3(1.0), u_vignette.x*v*0.6);
+    if(u_vignette.x < 0.0){
+      float k = 1.0 + u_vignette.x*v*0.9;
+      if(u_vig2.y > 0.001){ float Lv = enc(dot(c, LUMA)); k = mix(k, 1.0, u_vig2.y*smoothstep(0.55, 0.95, Lv)); } // highlight priority
+      c *= k;
+    } else c = mix(c, vec3(1.0), u_vignette.x*v*0.6);
   }
 
   // --- output encode ---
@@ -362,13 +382,18 @@ void main(){
   e.r = texture(u_curve, vec2(e.r*(255.0/256.0)+0.5/256.0, 0.5)).g;
   e.g = texture(u_curve, vec2(e.g*(255.0/256.0)+0.5/256.0, 0.5)).b;
   e.b = texture(u_curve, vec2(e.b*(255.0/256.0)+0.5/256.0, 0.5)).a;
+  if(u_clipWarn == 1){ // clipping warning (display only)
+    float mxe = max(e.r, max(e.g, e.b)), mne = min(e.r, min(e.g, e.b));
+    if(mxe >= 0.997) e = vec3(1.0, 0.12, 0.12); else if(mne <= 0.003) e = vec3(0.15, 0.35, 1.0);
+  }
   if(u_grain.x > 0.001){
     float sz = 1.0 + u_grain.y*3.0;
     vec2 gp = floor(fullPx/sz);
     float n = hash12(gp + u_seed) - 0.5;
     float n2 = hash12(gp*1.7 + 13.1 + u_seed) - 0.5;
     float lum = dot(e,LUMA); float mask = 0.25 + 0.75*(4.0*lum*(1.0-lum));
-    e += (n*0.75 + n2*0.25)*u_grain.x*0.22*mask;
+    float n3 = hash12(floor(fullPx/(sz*3.0)) + u_seed*1.37) - 0.5; // coarse clumping = roughness
+    e += (n*0.75 + n2*0.25)*u_grain.x*0.22*mask*(1.0 + (u_grainRough - 0.5)*3.2*n3);
   }
   if(u_showMask >= 0) e = mix(e, vec3(1.0, 0.15, 0.25), wShow*0.6);
   if(u_outMode == 0){

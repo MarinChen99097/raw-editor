@@ -27,7 +27,16 @@ button:disabled { opacity: .4; cursor: default; }
 #drop .big { font-size: 16px; padding: 12px 22px; }
 #status { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); background: rgba(20,20,24,.85); border: 1px solid var(--line); padding: 6px 12px; border-radius: 20px; font-size: 12px; color: var(--fg); display: none; backdrop-filter: blur(6px); white-space: nowrap; max-width: 90%; overflow: hidden; text-overflow: ellipsis; }
 #status.on { display: block; }
-#histo { position: absolute; right: 8px; top: 8px; width: 160px; height: 70px; background: rgba(15,15,18,.7); border: 1px solid var(--line); border-radius: 6px; pointer-events: none; }
+#histo { position: absolute; right: 8px; top: 8px; width: 160px; height: 70px; background: rgba(15,15,18,.7); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+#histo.clip { border-color: #ff5a5a; }
+.wbbar { align-items: center; } .wbbar .hint { margin: 0 4px 0 0; }
+.histlist { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 8px; max-height: 260px; overflow: auto; }
+.histlist button { text-align: left; font-size: 12.5px; padding: 6px 8px; display: flex; justify-content: space-between; gap: 8px; }
+.histlist button.on { border-color: var(--accent); }
+.histlist button.future { opacity: .45; }
+.pastelist { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin: 8px 0; }
+.pastelist label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; padding: 4px 0; }
+.pastelist input { width: 18px; height: 18px; }
 #zoomlbl { position: absolute; left: 8px; top: 8px; font-size: 11px; color: var(--dim); background: rgba(15,15,18,.7); padding: 2px 6px; border-radius: 4px; }
 #filmstrip { flex: 0 0 74px; display: flex; gap: 6px; padding: 6px; overflow-x: auto; overflow-y: hidden; background: #0c0c0e; border-top: 1px solid var(--line); touch-action: pan-x; }
 #filmstrip:empty, #filmstrip.hidden { display: none; }

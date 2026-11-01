@@ -5,7 +5,12 @@ const DEFAULTS = ({
   hsl: { h: [0, 0, 0, 0, 0, 0, 0, 0], s: [0, 0, 0, 0, 0, 0, 0, 0], l: [0, 0, 0, 0, 0, 0, 0, 0] },
   bw: false, bwmix: [0, 0, 0, 0, 0, 0, 0, 0],
   curves: { rgb: [[0, 0], [1, 1]], r: [[0, 0], [1, 1]], g: [[0, 0], [1, 1]], b: [[0, 0], [1, 1]] },
-  grade: { s: { h: 0, s: 0, l: 0 }, m: { h: 0, s: 0, l: 0 }, h: { h: 0, s: 0, l: 0 }, balance: 0 },
+  grade: { s: { h: 0, s: 0, l: 0 }, m: { h: 0, s: 0, l: 0 }, h: { h: 0, s: 0, l: 0 }, g: { h: 0, s: 0, l: 0 }, balance: 0, blend: 50 },
+  // parametric (region) tone curve: highlights / lights / darks / shadows with movable split points (Lightroom style)
+  pcurve: { hi: 0, li: 0, da: 0, sh: 0, s1: 25, s2: 50, s3: 75 },
+  // camera calibration: shadow tint and red/green/blue primary hue & saturation
+  calib: { shadow: 0, rh: 0, rs: 0, gh: 0, gs: 0, bh: 0, bs: 0 },
+  vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
   clarity: 0, dehaze: 0, texture: 0, fade: 0, vignette: 0, vigMid: 50, vigFeather: 50, grain: 0, grainSize: 25,
   sharpen: 25, sharpenRadius: 1, nrLum: 0, nrColor: 15,
   geo: { rot: 0, flipH: false, flipV: false, angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, aspect: 'free' },
@@ -102,7 +107,7 @@ function applyPreset(base, preset, amount = 1) {
   if (preset.film) p.film = { id: preset.film.id, amount: Math.round(lerp(0, preset.film.amount ?? 100)) };
   if (preset.bwmix) p.bwmix = preset.bwmix.map((v, i) => lerp(0, v));
   if (preset.hsl) for (const c of ['h', 's', 'l']) if (preset.hsl[c]) p.hsl[c] = preset.hsl[c].map(v => lerp(0, v));
-  if (preset.grade) { for (const r of ['s', 'm', 'h']) if (preset.grade[r]) p.grade[r] = { h: preset.grade[r].h || 0, s: lerp(0, preset.grade[r].s || 0), l: lerp(0, preset.grade[r].l || 0) }; if ('balance' in preset.grade) p.grade.balance = lerp(0, preset.grade.balance); }
+  if (preset.grade) { for (const r of ['s', 'm', 'h', 'g']) if (preset.grade[r]) p.grade[r] = { h: preset.grade[r].h || 0, s: lerp(0, preset.grade[r].s || 0), l: lerp(0, preset.grade[r].l || 0) }; if ('balance' in preset.grade) p.grade.balance = lerp(0, preset.grade.balance); }
   if (preset.curves) for (const c of ['rgb', 'r', 'g', 'b']) if (preset.curves[c]) {
     if (amount === 1) p.curves[c] = clone(preset.curves[c]);
     else { const L = curveLUT(preset.curves[c], 17); p.curves[c] = Array.from({ length: 17 }, (_, i) => [i / 16, Math.min(1, Math.max(0, lerp(i / 16, L[i])))]); }

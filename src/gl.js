@@ -174,6 +174,10 @@ class Renderer {
     gl.uniform1f(u.u_clarity, U.clarity); gl.uniform1f(u.u_dehaze, U.dehaze); gl.uniform1f(u.u_texture, U.texture);
     gl.uniform2fv(u.u_sharpen, U.sharpen); gl.uniform2fv(u.u_nr, U.nr); gl.uniform3fv(u.u_vignette, U.vignette); gl.uniform2fv(u.u_grain, U.grain);
     gl.uniform1f(u.u_fade, U.fade); gl.uniform1f(u.u_seed, this.seed);
+    gl.uniformMatrix3fv(u.u_calib, false, U.calib || [1, 0, 0, 0, 1, 0, 0, 0, 1]); gl.uniform1f(u.u_shadowTint, U.shadowTint || 0);
+    gl.uniform3fv(u.u_gradeG, U.gradeG || [0, 0, 0]); gl.uniform1f(u.u_gradeBlend, U.gradeBlend ?? 0.5);
+    gl.uniform2fv(u.u_vig2, U.vig2 || [0, 0]); gl.uniform1f(u.u_grainRough, U.grainRough ?? 0.5); gl.uniform1f(u.u_sharpMask, U.sharpMask || 0);
+    gl.uniform1i(u.u_clipWarn, U.clipWarn ? 1 : 0);
     // lens correction
     gl.uniform1i(u.u_lensOn, U.lensOn ? 1 : 0); if (U.lensOn) gl.uniform4fv(u.u_lens, U.lens); gl.uniform1f(u.u_defringe, U.defringe || 0);
     // local adjustments

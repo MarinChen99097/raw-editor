@@ -173,6 +173,7 @@ function uniformsFromParams(p, im, opts = {}) {
   packMasks(U, p.masks || []);
   { const f = p.film; if (f && f.id && f.amount > 0) { U.lutId = f.id; U.lutAmt = f.amount / 100; if (filmLUTState !== 'ready') loadFilmLUTs(); } }
   U.showMask = (!opts.export && im && im === CUR() && state.tab === 'local' && state.showMask && state.maskSel >= 0 && state.maskSel < U.nMasks) ? state.maskSel : -1;
+  U.clipWarn = !opts.export && im && im === CUR() && state.clipWarn ? 1 : 0;
   return U;
 }
 // Colour-grading hue sliders use ordinary RGB hue (0 red, 60 yellow, 120 green, 180 cyan, 240 blue, 300 magenta, as drawn on
@@ -207,6 +208,9 @@ function baseUniforms(p) {
     clarity: p.clarity / 100, dehaze: p.dehaze / 100, texture: p.texture / 100,
     sharpen: [p.sharpen / 100, p.sharpenRadius], nr: [p.nrLum / 100, p.nrColor / 100],
     vignette: [p.vignette / 100, p.vigMid / 100, p.vigFeather / 100], grain: [p.grain / 100, p.grainSize / 100], fade: p.fade / 100,
+    gradeG: g(p.grade.g || {}), gradeBlend: (p.grade.blend ?? 50) / 100,
+    calib: calibMatrix(p.calib), shadowTint: ((p.calib && p.calib.shadow) || 0) / 100,
+    vig2: [(p.vigRound || 0) / 100, (p.vigHi || 0) / 100], grainRough: (p.grainRough ?? 50) / 100, sharpMask: (p.sharpenMask || 0) / 100,
   };
 }
 const DEFAULT_U = uniformsFromParams(defaultParams());
@@ -220,8 +224,8 @@ const TABS = [
 const SL = {
   light: [['exposure', '曝光', -5, 5, 0.01, fmt.ev], ['contrast', '對比', -100, 100, 1, fmt.int], ['highlights', '亮部', -100, 100, 1, fmt.int], ['shadows', '暗部', -100, 100, 1, fmt.int], ['whites', '白色', -100, 100, 1, fmt.int], ['blacks', '黑色', -100, 100, 1, fmt.int]],
   color: [['temp', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3f78ff,#888,#ffb347)'], ['tint', '色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'], ['vibrance', '鮮豔度', -100, 100, 1, fmt.int], ['saturation', '飽和度', -100, 100, 1, fmt.int]],
-  fx: [['clarity', '清晰度', -100, 100, 1, fmt.int], ['texture', '紋理', -100, 100, 1, fmt.int], ['dehaze', '去朦朧', -100, 100, 1, fmt.int], ['fade', '褪色（霧面）', 0, 100, 1, fmt.pos], ['vignette', '暈影', -100, 100, 1, fmt.int], ['vigMid', '暈影中點', 0, 100, 1, fmt.pos], ['vigFeather', '暈影羽化', 0, 100, 1, fmt.pos], ['grain', '顆粒', 0, 100, 1, fmt.pos], ['grainSize', '顆粒大小', 0, 100, 1, fmt.pos]],
-  detail: [['sharpen', '銳利化', 0, 150, 1, fmt.pos], ['sharpenRadius', '銳利化半徑', 1, 3, 0.1, fmt.dec], ['nrLum', '明度降噪', 0, 100, 1, fmt.pos], ['nrColor', '色彩降噪', 0, 100, 1, fmt.pos]],
+  fx: [['clarity', '清晰度', -100, 100, 1, fmt.int], ['texture', '紋理', -100, 100, 1, fmt.int], ['dehaze', '去朦朧', -100, 100, 1, fmt.int], ['fade', '褪色（霧面）', 0, 100, 1, fmt.pos], ['vignette', '暈影', -100, 100, 1, fmt.int], ['vigMid', '暈影中點', 0, 100, 1, fmt.pos], ['vigFeather', '暈影羽化', 0, 100, 1, fmt.pos], ['vigRound', '暈影圓度', -100, 100, 1, fmt.int], ['vigHi', '亮部優先', 0, 100, 1, fmt.pos], ['grain', '顆粒', 0, 100, 1, fmt.pos], ['grainSize', '顆粒大小', 0, 100, 1, fmt.pos], ['grainRough', '顆粒粗糙度', 0, 100, 1, fmt.pos]],
+  detail: [['sharpen', '銳利化', 0, 150, 1, fmt.pos], ['sharpenRadius', '銳利化半徑', 1, 3, 0.1, fmt.dec], ['sharpenMask', '銳利化遮色（只銳化邊緣）', 0, 100, 1, fmt.pos], ['nrLum', '明度降噪', 0, 100, 1, fmt.pos], ['nrColor', '色彩降噪', 0, 100, 1, fmt.pos]],
 };
 const sliders = new Map(); // path -> {update()}
 const getPath = (o, path) => path.split('.').reduce((a, k) => a[k], o);
@@ -274,6 +278,7 @@ function setParam(path, v, doCommit) {
   setPath(im.params, path, v);
   const s = sliders.get(path); if (s) s.update();
   if (path === '_presetAmount') { if (im.presetObj && im.presetId) applyPresetUI(im.presetObj, im.presetId, true); return; }
+  if (path.startsWith('pcurve.')) renderer.setCurveLUT(curveLUTFor(im.params));
   if (path.startsWith('geo')) { requestRender(false); } else requestRender(true);
   if (doCommit) commit();
 }
@@ -286,11 +291,25 @@ function buildPanels() {
     const sec = el('div', { class: 'sec', id: 'sec-' + t.id }); panel.append(sec);
     if (SL[t.id]) { sec.append(hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設'))); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
     if (t.id === 'color') {
+      const wbBar = el('div', { class: 'toolbar wbbar' }, el('span', { class: 'hint' }, '白平衡'),
+        el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.temp = 0; im.params.tint = 0; refreshAll(); commit(); } }, '原廠'),
+        el('button', { onclick: () => autoWB() }, '自動'),
+        el('button', { id: 'wbPick', onclick: () => { state.pickWB = !state.pickWB; $('#wbPick').classList.toggle('on', state.pickWB); if (state.pickWB) toast('點一下照片中原本應該是白色或灰色的地方', 3500); } }, '吸管'));
+      sec.insertBefore(wbBar, sec.children[1]);
       sec.append(hdr('黑白'));
       const bwBtn = el('button', { id: 'bwToggle', onclick: () => { setParam('bw', !CUR().params.bw, true); refreshBW(); } }, '轉為黑白');
       sec.append(el('div', { class: 'toolbar' }, bwBtn));
       const mix = el('div', { id: 'bwmix' }); sec.append(mix);
       HSL_NAMES.forEach((n, i) => mix.append(makeSlider('bwmix.' + i, n + '色亮度', -100, 100, 1, fmt.int, `linear-gradient(90deg,#222,${HSL_COLORS[i]})`)));
+    }
+    if (t.id === 'color') {
+      const CK = ['calib.shadow', 'calib.rh', 'calib.rs', 'calib.gh', 'calib.gs', 'calib.bh', 'calib.bs'];
+      sec.append(hdr('相機校正', el('button', { onclick: () => resetGroup(CK) }, '重設')));
+      sec.append(makeSlider('calib.shadow', '陰影色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'));
+      for (const [c, n, g1, g2] of [['r', '紅', '#ff4fa0', '#ffa040'], ['g', '綠', '#c8e040', '#40e0b0'], ['b', '藍', '#40c8ff', '#9a60ff']]) {
+        sec.append(makeSlider(`calib.${c}h`, n + '原色 色相', -100, 100, 1, fmt.int, `linear-gradient(90deg,${g1},${g2})`));
+        sec.append(makeSlider(`calib.${c}s`, n + '原色 飽和度', -100, 100, 1, fmt.int));
+      }
     }
     if (t.id === 'hsl') {
       sec.append(hdr('HSL / 顏色', el('button', { onclick: () => { for (const c of 'hsl') for (let i = 0; i < 8; i++) setPath(CUR().params, `hsl.${c}.${i}`, 0); refreshAll(); commit(); } }, '重設')));
@@ -318,6 +337,11 @@ function buildPanels() {
       [['rgb', 'RGB'], ['r', '紅'], ['g', '綠'], ['b', '藍']].forEach(([c, n]) => seg.append(el('button', { 'data-c': c, class: c === 'rgb' ? 'on' : '', onclick: () => { curveEd.channel = c; [...seg.children].forEach(b => b.classList.toggle('on', b.dataset.c === c)); curveEd.draw(); } }, n)));
       curveEd.cv.id = 'curvecv';
       sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg), curveEd.cv, el('div', { class: 'hint' }, '點擊新增控制點、拖曳調整；快速連點兩下控制點可刪除。'));
+      const PC = ['pcurve.hi', 'pcurve.li', 'pcurve.da', 'pcurve.sh', 'pcurve.s1', 'pcurve.s2', 'pcurve.s3'];
+      sec.append(hdr('區域曲線', el('button', { onclick: () => resetGroup(PC) }, '重設')));
+      for (const [k, n] of [['hi', '亮部'], ['li', '亮調'], ['da', '暗調'], ['sh', '陰影']]) sec.append(makeSlider('pcurve.' + k, n, -100, 100, 1, fmt.int));
+      for (const [k, n] of [['s1', '分界：陰影／暗調'], ['s2', '分界：暗調／亮調'], ['s3', '分界：亮調／亮部']]) sec.append(makeSlider('pcurve.' + k, n, 5, 95, 1, fmt.pos));
+      sec.append(el('div', { class: 'hint' }, '區域曲線先套用，上面的點曲線再疊在它之上（和 Lightroom 一樣）。'));
     }
     if (t.id === 'grade') {
       sec.append(hdr('色調分離 / 分級', el('button', { onclick: () => { CUR().params.grade = clone(DEFAULTS.grade); refreshAll(); commit(); } }, '重設')));
@@ -327,13 +351,21 @@ function buildPanels() {
         sec.append(makeSlider(`grade.${r}.s`, '飽和度', 0, 100, 1, fmt.pos));
         sec.append(makeSlider(`grade.${r}.l`, '明度', -100, 100, 1, fmt.int));
       }
-      sec.append(hdr('整體')); sec.append(makeSlider('grade.balance', '平衡（陰影 ↔ 亮部）', -100, 100, 1, fmt.int));
+      sec.append(hdr('整體色輪'));
+      sec.append(makeSlider('grade.g.h', '色相', 0, 360, 1, fmt.deg, 'linear-gradient(90deg,#f66,#fc6,#cf6,#6f9,#6ff,#69f,#c6f,#f6c,#f66)'));
+      sec.append(makeSlider('grade.g.s', '飽和度', 0, 100, 1, fmt.pos)); sec.append(makeSlider('grade.g.l', '明度', -100, 100, 1, fmt.int));
+      sec.append(hdr('混合與平衡')); sec.append(makeSlider('grade.blend', '混合（區域重疊）', 0, 100, 1, fmt.pos));
+      sec.append(makeSlider('grade.balance', '平衡（陰影 ↔ 亮部）', -100, 100, 1, fmt.int));
     }
     if (t.id === 'local') buildLocalPanel(sec);
     if (t.id === 'lens') buildLensPanel(sec);
     if (t.id === 'crop') buildCropPanel(sec);
     if (t.id === 'presets') buildPresetPanel(sec);
-    if (t.id === 'info') sec.append(el('div', { class: 'info', id: 'infobox' }, '尚未開啟照片。'));
+    if (t.id === 'info') {
+      sec.append(el('div', { class: 'info', id: 'infobox' }, '尚未開啟照片。'));
+      sec.append(hdr('快照', el('button', { onclick: addSnapshot }, '＋ 建立快照')), el('div', { class: 'histlist', id: 'snapList' }));
+      sec.append(hdr('歷史紀錄'), el('div', { class: 'histlist', id: 'histList' }));
+    }
   }
   selectTab('light');
 }
@@ -350,6 +382,7 @@ function selectTab(id) {
   $('#side').classList.toggle('tall', id === 'curve' || id === 'hsl' || id === 'presets');
   if (id === 'curve') setTimeout(() => curveEd.draw(), 0);
   if (id === 'presets') schedulePresetThumbs();
+  if (id === 'info') renderHistoryUI();
   if (wasCrop !== state.cropMode) { if (!state.cropMode) commit(); fitView(); requestRender(false); }
   else if (CUR() && wasLocal !== (id === 'local') && state.showMask && state.maskSel >= 0) requestRender(false); // red mask overlay on/off
   else drawOverlay(); // handles / crop frame only
@@ -357,7 +390,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) curveEd.setCurves(CUR().params.curves); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷' };
@@ -496,6 +529,177 @@ function setAspect(k) {
 }
 function refreshCropUI() { const im = CUR(); if (!im || !cropUI.chips) return; const g = im.params.geo; [...cropUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.a === g.aspect)); $('#flipH').classList.toggle('on', g.flipH); $('#flipV').classList.toggle('on', g.flipV); }
 
+// ---------- camera calibration ----------
+// Red/green/blue primaries rotated towards their neighbours (hue) and pushed from/to grey (saturation) in linear RGB, then
+// rows rescaled so white stays white. Returns a column-major mat3.
+function calibMatrix(k) {
+  if (!k || !(k.rh || k.rs || k.gh || k.gs || k.bh || k.bs)) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const f = v => (v || 0) / 100, Y = [0.2126, 0.7152, 0.0722], H = 0.35;
+  const rh = f(k.rh), gh = f(k.gh), bh = f(k.bh);
+  const P = [ // red: + towards orange/yellow, - towards magenta; green: + towards cyan, - towards yellow; blue: + towards purple, - towards cyan
+    [1, Math.max(0, rh) * H, Math.max(0, -rh) * H],
+    [Math.max(0, -gh) * H, 1, Math.max(0, gh) * H],
+    [Math.max(0, bh) * H, Math.max(0, -bh) * H, 1]];
+  [f(k.rs), f(k.gs), f(k.bs)].forEach((s, i) => { const p = P[i], y = p[0] * Y[0] + p[1] * Y[1] + p[2] * Y[2]; for (let c = 0; c < 3; c++) p[c] = y + (p[c] - y) * (1 + s * 0.6); });
+  const w = [0, 1, 2].map(r => P[0][r] + P[1][r] + P[2][r]);
+  const m = []; for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) m.push(P[c][r] / w[r]);
+  return m;
+}
+
+// ---------- tone curve LUT: parametric (region) curve, then the point curves ----------
+function paramCurve(x, pc) {
+  if (!pc || !(pc.hi || pc.li || pc.da || pc.sh)) return x;
+  const sp = [pc.s1 ?? 25, pc.s2 ?? 50, pc.s3 ?? 75].map(v => Math.min(0.95, Math.max(0.05, v / 100))).sort((a, b) => a - b);
+  const edges = [0, sp[0], sp[1], sp[2], 1], amt = [pc.sh, pc.da, pc.li, pc.hi].map(v => (v || 0) / 100);
+  let y = x;
+  for (let i = 0; i < 4; i++) {
+    if (!amt[i]) continue;
+    const a = edges[i], b = edges[i + 1], c = (a + b) / 2, hw = Math.max(b - a, 0.05); // raised-cosine bump spanning the region and half of each neighbour
+    const t = (x - c) / hw; if (Math.abs(t) >= 1) continue;
+    y += amt[i] * 0.22 * (0.5 + 0.5 * Math.cos(Math.PI * t)) * Math.sqrt(Math.max(0, 4 * x * (1 - x))); // ends stay pinned
+  }
+  return y;
+}
+function curveLUTFor(p) {
+  const L = ['rgb', 'r', 'g', 'b'].map(k => curveLUT(p.curves[k]));
+  const o = new Float32Array(256 * 4); let prev = 0;
+  for (let i = 0; i < 256; i++) {
+    let y = Math.min(1, Math.max(prev, paramCurve(i / 255, p.pcurve))); prev = y; // monotone: no tonal inversions
+    const fpos = y * 255, j = Math.min(254, Math.floor(fpos)), t = fpos - j;
+    o[i * 4] = L[0][j] * (1 - t) + L[0][j + 1] * t;
+    for (let c = 1; c < 4; c++) o[i * 4 + c] = L[c][i];
+  }
+  return o;
+}
+
+// ---------- white balance: eyedropper and auto ----------
+// temp/tint (-100..100) that make linear (R,G,B) neutral with the editor's WB model wb = [1+0.45t, 1-0.25ti, 1-0.45t]
+function wbFromRGB(R, G, B) {
+  const q = B / Math.max(R, 1e-6), t = (q - 1) / (0.45 * (q + 1));
+  const ti = (1 - (R / Math.max(G, 1e-6)) * (1 + 0.45 * t)) / 0.25;
+  const cl = v => Math.round(Math.max(-100, Math.min(100, v * 100)));
+  return [cl(t), cl(ti), Math.abs(t) > 1 || Math.abs(ti) > 1];
+}
+function previewSample(cx, cy, r) { // mean linear RGB of the decoded preview around full-image px (cx, cy)
+  const pd = state.previewData; if (!pd) return null;
+  const px = Math.round(cx / pd.scale), py = Math.round(cy / pd.scale); let R = 0, G = 0, B = 0, n = 0, clip = 0;
+  for (let y = py - r; y <= py + r; y++) for (let x = px - r; x <= px + r; x++) {
+    if (x < 0 || y < 0 || x >= pd.w || y >= pd.h) continue; const i = (y * pd.w + x) * 3;
+    const a = pd.data[i], b = pd.data[i + 1], c = pd.data[i + 2]; if (Math.max(a, b, c) > 64000) { clip++; continue; }
+    R += a; G += b; B += c; n++;
+  }
+  return n ? { R: R / n, G: G / n, B: B / n, clip } : { clip };
+}
+function applyWB(t, ti, out) {
+  const im = CUR(); if (!im) return; im.params.temp = t; im.params.tint = ti; refreshAll(); commit();
+  toast(out ? `白平衡已設為 色溫 ${t}、色調 ${ti}（超出範圍，已到滑桿極限）` : `白平衡：色溫 ${t > 0 ? '+' : ''}${t}、色調 ${ti > 0 ? '+' : ''}${ti}`);
+}
+function pickWBAt(e) {
+  const im = CUR(); if (!im || !state.previewData) return;
+  const [sx, sy] = canvasPt(e); const iso = canvasToIso(sx, sy), Lm = Math.max(im.fullW, im.fullH);
+  const s = previewSample(iso[0] * Lm, iso[1] * Lm, 4);
+  if (!s || !s.R) { toast(s && s.clip ? '這裡過曝了，請點一個沒有過曝的白色或灰色區域' : '請點在照片上'); return; }
+  const [t, ti, out] = wbFromRGB(s.R, s.G, s.B);
+  state.pickWB = false; const b = $('#wbPick'); if (b) b.classList.remove('on');
+  applyWB(t, ti, out);
+}
+// Auto white balance: grey-world over mid tones, ignoring clipped and very dark pixels and the most saturated colours.
+function autoWB() {
+  const im = CUR(), pd = state.previewData; if (!im || !pd || pd.imId !== im.id) return;
+  const d = pd.data, n = pd.w * pd.h, step = Math.max(1, Math.floor(n / 200000)); let R = 0, G = 0, B = 0, k = 0;
+  for (let p = 0; p < n; p += step) {
+    const i = p * 3, r = d[i], g = d[i + 1], b = d[i + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx > 62000 || mx < 1500 || (mx - mn) / mx > 0.6) continue;
+    R += r; G += g; B += b; k++;
+  }
+  if (k < 100) { toast('這張照片沒有足夠的中性區域可以自動判斷'); return; }
+  const [t, ti, out] = wbFromRGB(R / k, G / k, B / k); applyWB(t, ti, out);
+}
+$('#histo').addEventListener('click', () => {
+  state.clipWarn = !state.clipWarn; $('#histo').classList.toggle('clip', state.clipWarn);
+  toast(state.clipWarn ? '剪裁警告：開（紅色＝亮部過曝，藍色＝暗部全黑）' : '剪裁警告：關'); requestRender(false);
+});
+
+// ---------- history list and snapshots ----------
+const PARAM_NAMES = (() => {
+  const o = { hsl: 'HSL', curves: '點曲線', pcurve: '區域曲線', grade: '色調分級', masks: '局部調整', lens: '鏡頭校正', geo: '裁切／旋轉', film: '膠片模擬',
+    bw: '黑白', bwmix: '黑白混色', calib: '相機校正', profile: '描述檔', profileAmt: '描述檔強度', spots: '污點修復' };
+  for (const list of Object.values(SL)) for (const s of list) o[s[0]] = s[1];
+  return o;
+})();
+function histLabel(a, b) {
+  const ch = Object.keys(b).filter(k => k !== '_presetAmount' && JSON.stringify(a[k]) !== JSON.stringify(b[k]));
+  if (!ch.length) return '（沒有變更）';
+  if (ch.length > 3) return `${ch.length} 項設定（預設集或貼上）`;
+  return ch.map(k => { const n = PARAM_NAMES[k] || k, v = b[k]; return typeof v === 'number' ? `${n} ${k === 'exposure' ? fmt.ev(v) : fmt.int(v)}` : n; }).join('、');
+}
+const snapKey = im => 'rawedit:snap:' + im.key;
+function loadSnaps(im) { if (!im.snaps) { try { im.snaps = JSON.parse(localStorage.getItem(snapKey(im)) || '[]'); } catch { im.snaps = []; } } return im.snaps; }
+function saveSnaps(im) { try { localStorage.setItem(snapKey(im), JSON.stringify(im.snaps || [])); } catch { toast('儲存空間不足，快照沒有存起來'); } }
+function addSnapshot() {
+  const im = CUR(); if (!im) return; const list = loadSnaps(im);
+  const name = prompt('快照名稱：', '快照 ' + (list.length + 1)); if (!name) return;
+  list.push({ name, t: Date.now(), params: stripAmount(im.params) }); saveSnaps(im); renderHistoryUI(); toast('已建立快照');
+}
+function renderHistoryUI() {
+  const hl = $('#histList'), sl = $('#snapList'); if (!hl || !sl) return; const im = CUR();
+  hl.innerHTML = ''; sl.innerHTML = ''; if (!im) return;
+  const snaps = loadSnaps(im);
+  if (!snaps.length) sl.append(el('div', { class: 'hint' }, '把目前的調整存成快照，之後可以隨時切回來比較。'));
+  snaps.forEach((s, i) => sl.append(el('button', {
+    onclick: () => { const geo = im.params.geo; im.params = mergeParams(s.params); im.presetId = null; refreshAll(); commit(); toast('已套用快照「' + s.name + '」'); },
+    oncontextmenu: e => { e.preventDefault(); if (confirm('刪除快照「' + s.name + '」？')) { snaps.splice(i, 1); saveSnaps(im); renderHistoryUI(); } }
+  }, el('span', {}, s.name), el('small', {}, new Date(s.t).toLocaleString() + ' · 長按刪除'))));
+  const H = im.hist.map(j => JSON.parse(j));
+  for (let i = H.length - 1; i >= 0; i--) {
+    const label = i === 0 ? '開啟（起點）' : histLabel(H[i - 1], H[i]);
+    hl.append(el('button', { class: (i === im.hi ? 'on' : '') + (i > im.hi ? ' future' : ''), onclick: () => { im.hi = i; im.params = JSON.parse(im.hist[i]); im.presetId = null; refreshAll(); updateUndoButtons(); saveEdits(im); } },
+      el('span', {}, label), el('small', {}, '#' + i)));
+  }
+}
+
+// ---------- selective copy / paste ----------
+// [id, name, param keys, checked by default]
+const COPY_GROUPS = [
+  ['wb', '白平衡', ['temp', 'tint'], true], ['light', '光線', ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks'], true],
+  ['presence', '鮮豔度／飽和度', ['vibrance', 'saturation'], true], ['profile', '描述檔／膠片', ['profile', 'profileAmt', 'film'], true],
+  ['hsl', 'HSL', ['hsl'], true], ['bw', '黑白', ['bw', 'bwmix'], true], ['curve', '曲線', ['curves', 'pcurve'], true], ['grade', '色調分級', ['grade'], true],
+  ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'], true],
+  ['detail', '細節', ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], true], ['calib', '相機校正', ['calib'], true], ['lens', '鏡頭校正', ['lens'], true],
+  ['masks', '局部調整（遮罩）', ['masks'], false], ['spots', '污點修復', ['spots'], false], ['geo', '裁切與旋轉', ['geo'], false]];
+function lastPasteGroups() {
+  try { const g = JSON.parse(localStorage.getItem('rawedit:pastegroups') || 'null'); if (Array.isArray(g)) return g; } catch { }
+  return COPY_GROUPS.filter(g => g[3]).map(g => g[0]);
+}
+function pasteSettings(all, groups) {
+  const src = state.clipboard; if (!src) { toast('請先在「⋯」選單按「複製設定」'); return; }
+  const keys = COPY_GROUPS.filter(g => groups.includes(g[0])).flatMap(g => g[2]);
+  const targets = all ? images : [CUR()].filter(Boolean); let n = 0;
+  for (const im of targets) {
+    const np = clone(im.params); for (const k of keys) if (k in src) np[k] = clone(src[k]);
+    if (JSON.stringify(np) === JSON.stringify(im.params)) continue;
+    im.params = np; im.presetId = null; n++;
+    if (im === CUR()) commit();
+    else { const snap = JSON.stringify(np); im.hist = im.hist.slice(0, im.hi + 1); im.hist.push(snap); if (im.hist.length > 60) im.hist.shift(); im.hi = im.hist.length - 1; im.edited = true; saveEdits(im); }
+  }
+  refreshAll(); updateFilmstrip(); toast(n ? `已貼到 ${n} 張照片` : '沒有需要變更的照片');
+}
+function openPasteDialog(all) {
+  if (!state.clipboard) { toast('請先在「⋯」選單按「複製設定」'); return; }
+  $('#modalMenu').classList.remove('on');
+  let m = $('#modalPaste');
+  if (!m) { m = el('div', { class: 'modal', id: 'modalPaste' }); document.body.append(m); m.addEventListener('click', e => { if (e.target === m) m.classList.remove('on'); }); }
+  const sel = new Set(lastPasteGroups()); const list = el('div', { class: 'pastelist' });
+  for (const [id, name] of COPY_GROUPS) { const cb = el('input', { type: 'checkbox' }); cb.checked = sel.has(id); cb.onchange = () => cb.checked ? sel.add(id) : sel.delete(id); list.append(el('label', {}, cb, name)); }
+  const go = a => { const g = [...sel]; try { localStorage.setItem('rawedit:pastegroups', JSON.stringify(g)); } catch { } m.classList.remove('on'); pasteSettings(a, g); };
+  m.innerHTML = '';
+  m.append(el('div', { class: 'sheet' }, el('h3', {}, '貼上哪些設定？'), list,
+    el('div', { class: 'toolbar' }, el('button', { class: all ? '' : 'primary', onclick: () => go(false) }, '貼到這張'),
+      el('button', { class: all ? 'primary' : '', onclick: () => go(true) }, `貼到全部 ${images.length} 張`), el('button', { onclick: () => m.classList.remove('on') }, '取消')),
+    el('div', { class: 'hint' }, '貼上不會清掉照片原本的復原紀錄。快速鍵 Ctrl+V 會用上次勾選的項目。')));
+  m.classList.add('on');
+}
+
 // ---------- film emulation LUTs ----------
 // FILM_LUTS (filmluts.js): { size, list:[{id,name,d,...}], data: base64(zlib(all LUTs, size^3*3 bytes each, red fastest)) }
 const FILM_LIST = (typeof FILM_LUTS !== 'undefined' && FILM_LUTS.list) || [];
@@ -632,16 +836,15 @@ function schedulePresetThumbs() {
     if (seq !== presetThumbJob.seq || CUR() !== im || state.tab !== 'presets') return;
     const t0 = performance.now();
     try { while (i < todo.length && performance.now() - t0 < 24) { drawPresetThumb(im, base, G, todo[i]); todo[i].sig = sig; i++; } }
-    finally { renderer.setCurveLUT(curveEd.lutRGBA()); } // thumbnails swap the curve LUT; restore it for the main view
+    finally { renderer.setCurveLUT(curveLUTFor(im.params)); } // thumbnails swap the curve LUT; restore it for the main view
     if (i < todo.length) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
 }
 function drawPresetThumb(im, base, G, card) {
   const p = card.preset ? applyPreset(base, card.preset.p, 1) : base;
-  const U = uniformsFromParams(p, im, {}); U.showMask = -1;
-  const ce = presetUI.ce || (presetUI.ce = new CurveEditor(document.createElement('canvas'), () => { }));
-  ce.curves = clone(p.curves); renderer.setCurveLUT(ce.lutRGBA());
+  const U = uniformsFromParams(p, im, {}); U.showMask = -1; U.clipWarn = 0;
+  renderer.setCurveLUT(curveLUTFor(p));
   const cv = card.canvas, CW = cv.width, CH = cv.height;
   const fitW = G.outW / G.outH > CW / CH ? Math.round(CH * 2 * G.outW / G.outH) : CW * 2; // render ~2x the box for a clean downscale
   const { px, w, h } = renderer.readSmall(U, G, fitW, 'pthumb');
@@ -665,7 +868,8 @@ function commit() {
   if (im.hist[im.hi] === snap) return;
   im.hist = im.hist.slice(0, im.hi + 1); im.hist.push(snap); if (im.hist.length > 60) im.hist.shift(); im.hi = im.hist.length - 1;
   im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(clone(defaultsFor(im)));
-  if (state.tab === 'presets') { refreshPresetUI(); clearTimeout(commit.pt); commit.pt = setTimeout(schedulePresetThumbs, 500); } updateUndoButtons(); saveEdits(im); updateFilmstrip();
+  if (state.tab === 'presets') { refreshPresetUI(); clearTimeout(commit.pt); commit.pt = setTimeout(schedulePresetThumbs, 500); }
+  if (state.tab === 'info') renderHistoryUI(); updateUndoButtons(); saveEdits(im); updateFilmstrip();
 }
 function stripAmount(p) { const c = clone(p); delete c._presetAmount; return c; }
 function undo() { const im = CUR(); if (!im || im.hi <= 0) return; im.hi--; im.params = JSON.parse(im.hist[im.hi]); im.presetId = null; refreshAll(); updateUndoButtons(); saveEdits(im); }
@@ -742,7 +946,7 @@ function drawOverlay() {
 function updateHistogram() {
   const im = CUR(); if (!im || !renderer.src || !state.hist) { $('#histo').style.display = 'none'; return; }
   $('#histo').style.display = '';
-  const HU = uniformsFromParams(im.params, im); HU.showMask = -1;
+  const HU = uniformsFromParams(im.params, im); HU.showMask = -1; HU.clipWarn = 0;
   const { px, w, h } = renderer.readSmall(HU, currentGeometry(), 256);
   const hr = new Uint32Array(256), hg = new Uint32Array(256), hb = new Uint32Array(256), hl = new Uint32Array(256);
   for (let i = 0; i < w * h * 4; i += 4) { hr[px[i]]++; hg[px[i + 1]]++; hb[px[i + 2]]++; hl[(px[i] * 54 + px[i + 1] * 183 + px[i + 2] * 19) >> 8]++; }
@@ -757,7 +961,7 @@ function updateHistogram() {
   ctx.globalCompositeOperation = 'source-over';
   curveEd.hist = Array.from(hl); if (state.tab === 'curve') curveEd.draw();
 }
-function onCurveChange() { const im = CUR(); if (!im) return; im.params.curves = clone(curveEd.curves); renderer.setCurveLUT(curveEd.lutRGBA()); requestRender(true); clearTimeout(onCurveChange.t); onCurveChange.t = setTimeout(commit, 400); }
+function onCurveChange() { const im = CUR(); if (!im) return; im.params.curves = clone(curveEd.curves); renderer.setCurveLUT(curveLUTFor(im.params)); requestRender(true); clearTimeout(onCurveChange.t); onCurveChange.t = setTimeout(commit, 400); }
 
 
 // ---------- local masks: coordinates, overlay, interaction ----------
@@ -904,6 +1108,7 @@ function cropHit(sx, sy) {
   return { l: nx, r: px, t: ny, b: py, move: !nx && !px && !ny && !py && sx > x0 && sx < x1 && sy > y0 && sy < y1 };
 }
 view.style.touchAction = 'none';
+view.addEventListener('pointerdown', e => { if (state.pickWB && CUR() && e.button === 0) { e.preventDefault(); e.stopImmediatePropagation(); pickWBAt(e); } }, true);
 view.addEventListener('pointerdown', e => {
   if (!CUR()) return; view.setPointerCapture(e.pointerId); const [x, y] = canvasPt(e); ptrs.set(e.pointerId, { x, y });
   if (ptrs.size === 1 && state.tab === 'local' && activeMask() && !spaceDown && e.button === 0 && CUR().fullW) {
@@ -1049,7 +1254,7 @@ async function selectImage(i) {
     if (r.thumbURL && !im.thumbUrl) { im.thumbUrl = r.thumbURL; updateFilmstrip(); }
     if (r.thumb && !im.thumbBlobUrl) { im.thumbBlobUrl = URL.createObjectURL(new Blob([r.thumb], { type: 'image/jpeg' })); im.thumbUrl = im.thumbBlobUrl; updateFilmstrip(); }
     ti.style.display = 'none';
-    curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveEd.lutRGBA());
+    curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveLUTFor(im.params));
     fitCanvas(); fitView(); refreshLensUI(); refreshLocalUI(); requestRender(false); showInfo(); $('#btnExport').disabled = false;
     schedulePresetThumbs();
     $('#finfo').textContent = `${im.fullW}×${im.fullH} · 預覽 ${r.width}×${r.height} · ${(r.timings.total / 1000).toFixed(1)}s`;
@@ -1081,8 +1286,8 @@ for (const m of document.querySelectorAll('.modal')) m.addEventListener('click',
 $('#mSaveJson').onclick = () => { const im = CUR(); if (!im) return; download(new Blob([settingsJSON(im)], { type: 'application/json' }), im.name.replace(/\.[^.]+$/, '') + '.json'); };
 $('#mLoadJson').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { applyLoadedSettings(JSON.parse(await inp.files[0].text())); } catch (e) { toast('讀取失敗：' + e.message); } }; inp.click(); };
 $('#mCopy').onclick = () => { const im = CUR(); if (!im) return; state.clipboard = stripAmount(im.params); toast('已複製設定'); };
-$('#mPaste').onclick = () => { const im = CUR(); if (!im || !state.clipboard) return; const geo = im.params.geo; im.params = mergeParams(state.clipboard); im.params.geo = geo; im.presetId = null; refreshAll(); commit(); toast('已貼上設定（不含裁切）'); };
-$('#mPasteAll').onclick = () => { if (!state.clipboard) { toast('請先複製設定'); return; } for (const im of images) { const geo = im.params.geo; im.params = mergeParams(state.clipboard); im.params.geo = geo; im.hist = [JSON.stringify(im.params)]; im.hi = 0; im.edited = true; saveEdits(im); } refreshAll(); toast('已套用到 ' + images.length + ' 張'); };
+$('#mPaste').onclick = () => openPasteDialog(false);
+$('#mPasteAll').onclick = () => openPasteDialog(true);
 $('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = clone(defaultsFor(im)); im.presetId = null; refreshAll(); fitView(); commit(); };
 $('#mExportPresets').onclick = () => download(new Blob([JSON.stringify({ app: 'RAW Editor', presets: userPresets }, null, 1)], { type: 'application/json' }), 'raw-editor-presets.json');
 $('#mImportPresets').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { const j = JSON.parse(await inp.files[0].text()); const list = j.presets || (Array.isArray(j) ? j : null); if (!list) throw new Error('格式不符'); for (const p of list) if (p && p.name && p.p) userPresets.push(p); saveUserPresets(); renderPresetGrid(); toast('已匯入 ' + list.length + ' 個預設集'); } catch (e) { toast('匯入失敗：' + e.message); } }; inp.click(); };
@@ -1100,7 +1305,7 @@ addEventListener('keydown', e => {
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.tab === 'local' && activeMask()) { e.preventDefault(); delMask(); }
   else if (e.key === '\\' || e.key === ' ') { if (!CUR()) return; e.preventDefault(); ensureBefore(); state.compare = state.compare === 1 ? 0 : 1; draw(); }
   else if (e.key === '0') { fitView(); requestDraw(); }
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { $('#mCopy').onclick(); } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { $('#mPaste').onclick(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { $('#mCopy').onclick(); } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { pasteSettings(false, lastPasteGroups()); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); $('#btnExport').click(); }
 });
 
@@ -1113,7 +1318,8 @@ $('#expGo').onclick = async () => {
   if (state.busy) return; state.busy = true; state.cancelExport = false; $('#expGo').disabled = true; $('#expGo').textContent = '處理中…';
   const sizeSel = $('#expSize').value, quality = clamp(+$('#expQ').value || 92, 50, 100), demosaic = $('#expDemosaic').value, wantExif = $('#expExif').checked, format = $('#expFmt').value;
   const list = $('#expScope').value === 'all' ? images.slice() : [CUR()];
-  const results = [];
+  const results = []; let keptMB = 0;
+  const shareBatch = list.length > 1 && IS_TOUCH && !!navigator.canShare && format === 'jpeg';
   try {
     for (let n = 0; n < list.length; n++) {
       const im = list[n]; if (state.cancelExport) break;
@@ -1121,8 +1327,11 @@ $('#expGo').onclick = async () => {
       const blob = await exportImage(im, { sizeSel, quality, demosaic, wantExif, format }, prog);
       if (!blob) continue;
       const outName = im.name.replace(/\.[^.]+$/, '') + (format === 'tiff' ? '_edit.tif' : '_edit.jpg');
-      results.push({ blob, name: outName });
-      if (list.length > 1 || !(navigator.canShare && IS_TOUCH)) download(blob, outName);
+      // batch on a phone: keep JPEGs (up to ~400 MB) so they can be shared / saved to Photos in one go; otherwise save right away
+      // and drop the blob so memory does not grow with every photo
+      const keep = (list.length === 1 && navigator.canShare && IS_TOUCH) || (list.length > 1 && shareBatch && keptMB + blob.size / 1048576 < 400);
+      if (keep) { keptMB += blob.size / 1048576; results.push({ blob, name: outName, size: blob.size }); }
+      else { download(blob, outName); results.push({ name: outName, size: blob.size }); }
     }
     if (results.length === 1 && navigator.canShare && IS_TOUCH) {
       const f = new File([results[0].blob], results[0].name, { type: results[0].blob.type || 'image/jpeg' });
@@ -1130,7 +1339,17 @@ $('#expGo').onclick = async () => {
       if (navigator.canShare({ files: [f] })) row.append(el('button', { class: 'primary', onclick: async () => { try { await navigator.share({ files: [f] }); } catch (e) { } } }, '分享 / 儲存到相簿'));
       row.append(el('button', { onclick: () => download(results[0].blob, results[0].name) }, '下載檔案'));
       $('#expMsg').append(el('div', { class: 'hint' }, `完成：${results[0].name}（${(results[0].blob.size / 1048576).toFixed(1)} MB）`), row);
-    } else if (results.length) $('#expMsg').textContent = `完成 ${results.length} 張，共 ${(results.reduce((a, r) => a + r.blob.size, 0) / 1048576).toFixed(1)} MB`;
+    } else if (results.length) {
+      $('#expMsg').textContent = `完成 ${results.length} 張，共 ${(results.reduce((a, r) => a + r.size, 0) / 1048576).toFixed(1)} MB`;
+      const kept = results.filter(r => r.blob);
+      if (kept.length) {
+        const files = kept.map(r => new File([r.blob], r.name, { type: r.blob.type || 'image/jpeg' })); const row = el('div', { class: 'toolbar' });
+        if (navigator.canShare({ files })) row.append(el('button', { class: 'primary', onclick: async () => { try { await navigator.share({ files }); } catch (e) { } } }, `分享 / 儲存 ${files.length} 張到相簿`));
+        row.append(el('button', { onclick: () => kept.forEach((r, i) => setTimeout(() => download(r.blob, r.name), i * 400)) }, '全部下載'));
+        $('#expMsg').append(row);
+        if (kept.length < results.length) $('#expMsg').append(el('div', { class: 'hint' }, `另外 ${results.length - kept.length} 張已直接下載（避免占用太多記憶體）。`));
+      }
+    }
     else if (state.cancelExport) $('#expMsg').textContent = '已取消';
   } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + friendlyError(e); }
   finally { state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
@@ -1157,10 +1376,10 @@ async function exportImage(im, o, prog) {
   const U = uniformsFromParams(params, im, { export: true });
   if (U.useBrush) syncBrush(im);
   // make sure the LUT matches this image
-  const ce = new CurveEditor(document.createElement('canvas'), () => { }); ce.curves = clone(params.curves); renderer.setCurveLUT(ce.lutRGBA());
+  renderer.setCurveLUT(curveLUTFor(params));
   try {
     await renderer.renderExport(U, { outW, outH, m }, src, (rows, n) => enc.addRows(rows, n), prog, () => state.cancelExport, tiff ? 16 : 8);
-  } finally { if (CUR()) { renderer.setCurveLUT(curveEd.lutRGBA()); syncBrush(CUR()); } } // restore LUT and brush texture for the current image
+  } finally { if (CUR()) { renderer.setCurveLUT(curveLUTFor(CUR().params)); syncBrush(CUR()); } } // restore LUT and brush texture for the current image
   if (state.cancelExport) return null;
   prog(tiff ? '寫入 TIFF…' : '寫入 JPEG…', 0.98);
   if (tiff) return enc.finish();
@@ -1168,7 +1387,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
