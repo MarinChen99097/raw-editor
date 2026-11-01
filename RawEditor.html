@@ -2686,9 +2686,12 @@ async function fitCameraLook(im, src, isStale = () => false) {
     if (CUR()) renderer.setCurveLUT(curveLUTFor(CUR().params));
   }
 }
+// the photo's starting point: defaults plus the fitted camera look. Every 「重設」 (photo, section) returns here, like
+// Lightroom's reset to the import defaults; double-tapping a single slider still sets that slider to 0.
+function startingParams(im) { const p = clone(defaultsFor(im)); if (im.look && camLookOn) Object.assign(p, clone(im.look)); return p; }
 // apply fitted values as the photo's starting point (not an edit: history starts here, the photo is not marked edited)
 function applyCameraLook(im, vals) {
-  im.params = Object.assign(clone(im.params), vals); im.look = vals;
+  im.params = Object.assign(clone(im.params), clone(vals)); im.look = vals; // a copy: editing the HSL sliders must not change the saved look
   im.hist = [JSON.stringify(im.params)]; im.hi = 0;
 }
 // 「相機色調」 button: fit again on the current photo (e.g. after resetting), as a normal undoable edit
@@ -2700,7 +2703,7 @@ async function cameraLookButton() {
   const keep = clone(im.params); clearCameraLook(im.params);
   const vals = await fitCameraLook(im, null); status('');
   if (!vals) { im.params = keep; toast('無法比對相機 JPEG', 3000, { kind: 'err' }); return; }
-  Object.assign(im.params, vals); im.look = vals; im.presetId = null; refreshAll(); commit();
+  Object.assign(im.params, clone(vals)); im.look = vals; im.presetId = null; refreshAll(); commit();
   toast('已套用相機 JPEG 的色調');
 }
 function camLookToast(im) {
@@ -2913,7 +2916,7 @@ function buildPanels() {
     if (t.id === 'hsl') {
       sec.append(hdr('點顏色', el('button', { id: 'pcPick', onclick: () => { const im = CUR(); if (!im) return; if ((im.params.pointColors || []).length >= 4) { toast('最多 4 個點顏色'); return; } state.pickPC = !state.pickPC; $('#pcPick').classList.toggle('on', state.pickPC); if (state.pickPC) toast('點一下照片上要調整的顏色', 3000); } }, '＋ 吸取顏色')));
       sec.append(el('div', { id: 'pcList' }));
-      sec.append(hdr('HSL / 顏色', el('button', { onclick: () => { for (const c of 'hsl') for (let i = 0; i < 8; i++) setPath(CUR().params, `hsl.${c}.${i}`, 0); refreshAll(); commit(); } }, '重設')));
+      sec.append(hdr('HSL / 顏色', el('button', { onclick: () => resetGroup(['hsl']) }, '重設')));
       const bands = el('div', { class: 'hslbands' }); sec.append(bands);
       let band = 0; const mode = el('div', { class: 'seg' }); let modeSel = 'all';
       const rows = el('div');
@@ -2986,7 +2989,7 @@ function selectTab(id) {
   else drawOverlay(); // handles / crop frame only
   fitCanvas();
 }
-function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
+function resetGroup(keys) { const im = CUR(); if (!im) return; const st = startingParams(im); for (const k of keys) setPath(im.params, k, clone(getPath(st, k))); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
 function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
@@ -4669,7 +4672,15 @@ $('#mLoadJson').onclick = () => { const inp = el('input', { type: 'file', accept
 $('#mCopy').onclick = () => { const im = CUR(); if (!im) return; state.clipboard = stripAmount(im.params); toast('已複製設定'); };
 $('#mPaste').onclick = () => openPasteDialog(false);
 $('#mPasteAll').onclick = () => openPasteDialog(true);
-$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = clone(defaultsFor(im)); im.presetId = null; refreshAll(); fitView(); commit();  $('#modalMenu').classList.remove('on'); toast('已重設這張照片', 5000, { action: { label: '復原', fn: undo } }); };
+$('#mReset').onclick = async () => {
+  const im = CUR(); if (!im) return; $('#modalMenu').classList.remove('on');
+  if (!im.look && camLookOn && !im.file._isImage && im.thumbBlobUrl && state.previewData && state.previewData.imId === im.id) {
+    status('比對相機 JPEG 的色調…'); const v = await fitCameraLook(Object.assign({}, im, { params: clone(defaultsFor(im)) }), null); status('');
+    if (CUR() !== im) return; if (v) im.look = v;
+  }
+  im.params = startingParams(im); im.presetId = null; refreshAll(); fitView(); commit();
+  toast(im.look && camLookOn ? '已重設為相機 JPEG 的色調' : '已重設這張照片', 5000, { action: { label: '復原', fn: undo } });
+};
 $('#mExportPresets').onclick = () => download(new Blob([JSON.stringify({ app: 'RAW Editor', presets: userPresets }, null, 1)], { type: 'application/json' }), 'raw-editor-presets.json');
 $('#mImportPresets').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { const j = JSON.parse(await inp.files[0].text()); const list = j.presets || (Array.isArray(j) ? j : null); if (!list) throw new Error('格式不符'); for (const p of list) if (p && p.name && p.p) userPresets.push(p); saveUserPresets(); renderPresetGrid(); toast('已匯入 ' + list.length + ' 個預設集'); } catch (e) { toast('匯入失敗：' + e.message); } }; inp.click(); };
 $('#optCamLook').checked = camLookOn; $('#optCamLook').onchange = e => { camLookOn = e.target.checked; try { localStorage.setItem('rawedit:camlook', camLookOn ? '1' : '0'); } catch { } };
@@ -4775,7 +4786,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
