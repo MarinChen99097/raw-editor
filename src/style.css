@@ -81,6 +81,15 @@ button:disabled { opacity: .4; cursor: default; }
 .presets .pcard small { padding: 0 8px 7px; color: var(--dim); font-size: 11px; }
 .presets .pcard.on { border-color: var(--accent); }
 .presets .pcard.user { border-style: dashed; }
+.presets .pcard { position: relative; }
+.presets .pcard.off { opacity: .35; }
+.presets .ptick { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 14px; line-height: 22px; text-align: center; }
+.presets .ptick::after { content: '✓'; }
+.presets .pcard.off .ptick { background: #555; }
+.presets .pcard.off .ptick::after { content: '✕'; }
+.peditbar { margin: 0 0 6px; }
+.filmrow { margin: 2px 0 6px; padding: 6px 10px 2px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); }
+.filmrow .hdr { margin: 0; text-transform: none; letter-spacing: 0; }
 .info { font-size: 12.5px; color: var(--dim); line-height: 1.7; }
 .info b { color: var(--fg); font-weight: 500; }
 .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }

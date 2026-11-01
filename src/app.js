@@ -171,6 +171,7 @@ function uniformsFromParams(p, im, opts = {}) {
   const U = baseUniforms(p);
   if (im) { const L = lensFor(im, p.lens || DEFAULTS.lens); U.lensOn = L.on; U.lens = L.table; U.defringe = ((p.lens && p.lens.defringe) || 0) / 100; }
   packMasks(U, p.masks || []);
+  { const f = p.film; if (f && f.id && f.amount > 0) { U.lutId = f.id; U.lutAmt = f.amount / 100; if (filmLUTState !== 'ready') loadFilmLUTs(); } }
   U.showMask = (!opts.export && im && im === CUR() && state.tab === 'local' && state.showMask && state.maskSel >= 0 && state.maskSel < U.nMasks) ? state.maskSel : -1;
   return U;
 }
@@ -495,36 +496,96 @@ function setAspect(k) {
 }
 function refreshCropUI() { const im = CUR(); if (!im || !cropUI.chips) return; const g = im.params.geo; [...cropUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.a === g.aspect)); $('#flipH').classList.toggle('on', g.flipH); $('#flipV').classList.toggle('on', g.flipV); }
 
+// ---------- film emulation LUTs ----------
+// FILM_LUTS (filmluts.js): { size, list:[{id,name,d,...}], data: base64(zlib(all LUTs, size^3*3 bytes each, red fastest)) }
+const FILM_LIST = (typeof FILM_LUTS !== 'undefined' && FILM_LUTS.list) || [];
+for (const f of FILM_LIST) PRESETS.push({ id: 'lut_' + f.id, cat: 'lut', name: f.name, d: f.d, p: { film: { id: f.id, amount: f.amount ?? 100 } } });
+let filmLUTState = null; // null | Promise | 'ready' | 'error'
+function loadFilmLUTs() {
+  if (filmLUTState || !FILM_LIST.length) return filmLUTState;
+  filmLUTState = (async () => {
+    const bin = Uint8Array.from(atob(FILM_LUTS.data), c => c.charCodeAt(0));
+    const raw = new Uint8Array(await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    const N = FILM_LUTS.size, n = N * N * N * 3;
+    FILM_LIST.forEach((f, i) => renderer.setFilmLUT(f.id, N, decodeFilmLUT(raw.subarray(i * n, (i + 1) * n), N)));
+    filmLUTState = 'ready';
+    if (presetUI.cards) presetUI.cards.forEach(c => c.sig = '');
+    if (CUR()) requestRender(false); schedulePresetThumbs();
+  })().catch(e => { console.error(e); filmLUTState = 'error'; toast('膠片模擬資料載入失敗：' + e.message, 5000); });
+  return filmLUTState;
+}
+// undo the encoding of tools/make_film_luts.py: running sum along red, then add the identity LUT (all mod 256)
+function decodeFilmLUT(src, N) {
+  const ident = Array.from({ length: N }, (_, i) => Math.round(i * 255 / (N - 1))), out = new Uint8Array(src.length);
+  for (let b = 0, o = 0; b < N; b++) for (let g = 0; g < N; g++) {
+    let dr = 0, dg = 0, db = 0;
+    for (let r = 0; r < N; r++, o += 3) {
+      dr = (dr + src[o]) & 255; dg = (dg + src[o + 1]) & 255; db = (db + src[o + 2]) & 255;
+      out[o] = (dr + ident[r]) & 255; out[o + 1] = (dg + ident[g]) & 255; out[o + 2] = (db + ident[b]) & 255;
+    }
+  }
+  return out;
+}
+const filmName = id => (FILM_LIST.find(f => f.id === id) || {}).name || id;
+
 // ---------- presets panel ----------
 // Presets only set ordinary sliders (see PRESETS in presets.js), so everything stays adjustable afterwards.
-const PRESET_CATS = [['basic', '基本'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['user', '我的']];
-let presetUI = {};
-let presetCat = 'fuji'; try { presetCat = localStorage.getItem('rawedit:pcat') || 'fuji'; } catch { }
+const PRESET_CATS = [['basic', '基本'], ['lut', '膠片模擬'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['master', '大師風格'], ['user', '我的']];
+let presetUI = { edit: false };
+let presetCat = 'lut'; try { presetCat = localStorage.getItem('rawedit:pcat') || 'lut'; } catch { }
+let hiddenPresets = new Set(); try { hiddenPresets = new Set(JSON.parse(localStorage.getItem('rawedit:hidden') || '[]')); } catch { }
+const saveHidden = () => { try { localStorage.setItem('rawedit:hidden', JSON.stringify([...hiddenPresets])); } catch { } };
+const presetItems = cat => cat === 'user'
+  ? userPresets.map((p, i) => ({ p, id: 'u' + i, user: true, i }))
+  : PRESETS.map((p, i) => ({ p, id: 'b:' + (p.id || i) })).filter(x => (x.p.cat || 'basic') === cat);
+const visibleItems = cat => presetItems(cat).filter(x => x.user || !hiddenPresets.has(x.id));
 function buildPresetPanel(sec) {
-  sec.append(hdr('預設集', el('button', { onclick: savePresetDialog }, '＋ 儲存目前設定')));
+  presetUI.editBtn = el('button', { onclick: () => { presetUI.edit = !presetUI.edit; renderPresetGrid(); } }, '管理');
+  sec.append(hdr('預設集', presetUI.editBtn, el('button', { onclick: savePresetDialog }, '＋ 儲存目前設定')));
   const chips = el('div', { class: 'pcats' }); sec.append(chips); presetUI.chips = chips;
-  const amt = makeSlider('_presetAmount', '強度', 0, 150, 1, fmt.pos); sec.append(amt);
+  presetUI.editBar = el('div', { class: 'toolbar peditbar' },
+    el('button', { onclick: () => { for (const it of presetItems(presetCat)) hiddenPresets.delete(it.id); saveHidden(); renderPresetGrid(); } }, '這類全部顯示'),
+    el('button', { onclick: () => { for (const it of presetItems(presetCat)) if (!it.user) hiddenPresets.add(it.id); saveHidden(); renderPresetGrid(); } }, '這類全部隱藏'),
+    el('button', { onclick: () => { if (confirm('顯示所有預設集？')) { hiddenPresets.clear(); saveHidden(); renderPresetGrid(); } } }, '全部還原'));
+  sec.append(presetUI.editBar);
+  presetUI.amt = makeSlider('_presetAmount', '強度', 0, 150, 1, fmt.pos); sec.append(presetUI.amt);
+  presetUI.filmRow = el('div', { class: 'filmrow' },
+    hdr('', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.film = { id: '', amount: 100 }; refreshAll(); commit(); } }, '移除膠片')),
+    makeSlider('film.amount', '膠片強度', 0, 100, 1, fmt.pos));
+  sec.append(presetUI.filmRow);
   const grid = el('div', { class: 'presets' }); sec.append(grid); presetUI.grid = grid;
-  sec.append(el('div', { class: 'hint' }, '點一下套用，換別的預設會直接取代、不會疊加。預設集只是幫你拉好滑桿，套用後每個滑桿都能再調；「強度」以套用前的照片為基準重新計算。不影響裁切、局部調整與鏡頭校正。'));
+  presetUI.hint = el('div', { class: 'hint' }); sec.append(presetUI.hint);
   renderPresetGrid();
 }
 // the amount slider lives outside params: emulate a param path on a side object
 for (const d of [DEFAULTS, IMG_DEFAULTS]) Object.defineProperty(d, '_presetAmount', { value: 100, enumerable: false });
 function renderPresetGrid() {
   const grid = presetUI.grid; if (!grid) return; grid.innerHTML = '';
+  const edit = presetUI.edit;
+  // categories with nothing visible disappear outside the manager ("我的" always stays, it holds the save hint)
+  const cats = PRESET_CATS.filter(([id]) => (id !== 'lut' || FILM_LIST.length) && (edit || id === 'user' || visibleItems(id).length) && presetItems(id).length + (id === 'user' ? 1 : 0));
+  if (!cats.some(([id]) => id === presetCat)) presetCat = cats[0][0];
   presetUI.chips.innerHTML = '';
-  for (const [id, name] of PRESET_CATS) presetUI.chips.append(el('button', { class: id === presetCat ? 'on' : '', onclick: () => { presetCat = id; try { localStorage.setItem('rawedit:pcat', id); } catch { } renderPresetGrid(); } }, name));
-  const items = presetCat === 'user'
-    ? userPresets.map((p, i) => ({ p, id: 'u' + i, user: true, i }))
-    : PRESETS.map((p, i) => ({ p, id: 'b:' + (p.id || i) })).filter(x => (x.p.cat || 'basic') === presetCat);
+  for (const [id, name] of cats) presetUI.chips.append(el('button', { class: id === presetCat ? 'on' : '', onclick: () => { presetCat = id; try { localStorage.setItem('rawedit:pcat', id); } catch { } renderPresetGrid(); } }, name));
+  presetUI.editBtn.textContent = edit ? '完成' : '管理'; presetUI.editBtn.classList.toggle('on', edit);
+  presetUI.editBar.style.display = edit ? '' : 'none'; presetUI.amt.style.display = edit ? 'none' : '';
+  presetUI.hint.textContent = edit ? '點卡片切換顯示／隱藏，隱藏的預設集不會出現在清單裡。設定存在這台裝置。'
+    : '點一下套用，換別的預設會直接取代、不會疊加；之後手動調過的滑桿會保留。預設集只是幫你拉好滑桿，套用後每個都能再調。「膠片模擬」是底片 LUT，會疊在你的調整之後，可用「膠片強度」調整或移除。不影響裁切、局部調整與鏡頭校正。';
+  if (presetCat === 'lut') loadFilmLUTs();
+  const items = edit ? presetItems(presetCat) : visibleItems(presetCat);
   const card = (it, label, sub) => {
     const cv = el('canvas', { class: 'pthumb', width: 300, height: 200 });
-    const attrs = { class: 'pcard' + (it.user ? ' user' : ''), 'data-id': it.id, onclick: () => it.id === 'none' ? clearPresetUI() : applyPresetUI(it.p, it.id) };
+    const off = !it.user && it.id !== 'none' && hiddenPresets.has(it.id);
+    const click = () => {
+      if (edit) { if (it.user || it.id === 'none') return; hiddenPresets.has(it.id) ? hiddenPresets.delete(it.id) : hiddenPresets.add(it.id); saveHidden(); b.classList.toggle('off'); return; }
+      it.id === 'none' ? clearPresetUI() : applyPresetUI(it.p, it.id);
+    };
+    const attrs = { class: 'pcard' + (it.user ? ' user' : '') + (off ? ' off' : '') + (edit ? ' editing' : ''), 'data-id': it.id, onclick: click };
     if (it.user) attrs.oncontextmenu = e => { e.preventDefault(); if (confirm('刪除預設集「' + it.p.name + '」？')) { userPresets.splice(it.i, 1); saveUserPresets(); renderPresetGrid(); } };
-    const b = el('button', attrs, cv, el('span', { class: 'pn' }, label), el('small', {}, sub));
+    const b = el('button', attrs, cv, el('span', { class: 'pn' }, label), el('small', {}, sub), edit && !it.user ? el('span', { class: 'ptick' }) : '');
     grid.append(b); return { btn: b, canvas: cv, preset: it.id === 'none' ? null : it.p, id: it.id, sig: '' };
   };
-  presetUI.cards = [card({ id: 'none' }, '原圖', '不套用預設')];
+  presetUI.cards = edit ? [] : [card({ id: 'none' }, '原圖', '不套用預設')];
   for (const it of items) presetUI.cards.push(card(it, it.p.name, it.p.d || it.p.en || (it.user ? '我的預設 · 長按/右鍵刪除' : '')));
   if (presetCat === 'user' && !items.length) grid.append(el('div', { class: 'hint' }, '還沒有自己的預設。調好一張照片後，按上方「＋ 儲存目前設定」。'));
   refreshPresetUI(); schedulePresetThumbs();
@@ -555,7 +616,9 @@ function clearPresetUI() {
 function refreshPresetUI() {
   const im = CUR(); if (!presetUI.cards) return;
   const cur = im && im.presetId && JSON.stringify(stripAmount(im.params)) === im.presetResult ? im.presetId : 'none';
-  for (const c of presetUI.cards) c.btn.classList.toggle('on', !!im && c.id === cur);
+  for (const c of presetUI.cards) c.btn.classList.toggle('on', !presetUI.edit && !!im && c.id === cur);
+  const f = im && im.params.film && im.params.film.id;
+  if (presetUI.filmRow) { presetUI.filmRow.style.display = f && !presetUI.edit ? '' : 'none'; if (f) presetUI.filmRow.querySelector('.hdr span').textContent = '膠片：' + filmName(f); }
 }
 // Live thumbnails: each preset rendered from the current photo (small GPU render, a few per frame so the UI stays responsive)
 const presetThumbJob = { seq: 0 };
@@ -563,7 +626,7 @@ function schedulePresetThumbs() {
   const seq = ++presetThumbJob.seq; const im = CUR();
   if (!im || state.tab !== 'presets' || !presetUI.cards || !renderer.src || !state.previewData || state.previewData.imId !== im.id) return;
   const base = stripAmount(presetBaseFor(im)); const G = geometry(im.params.geo, im.fullW, im.fullH);
-  const sig = im.id + '|' + JSON.stringify(base) + '|' + G.outW + 'x' + G.outH;
+  const sig = im.id + '|' + JSON.stringify(base) + '|' + G.outW + 'x' + G.outH + '|' + (filmLUTState === 'ready');
   const todo = presetUI.cards.filter(c => c.sig !== sig); let i = 0;
   const step = () => {
     if (seq !== presetThumbJob.seq || CUR() !== im || state.tab !== 'presets') return;
@@ -592,7 +655,7 @@ function drawPresetThumb(im, base, G, card) {
 }
 function savePresetDialog() {
   const im = CUR(); if (!im) return; const name = prompt('預設集名稱：', '我的預設 ' + (userPresets.length + 1)); if (!name) return;
-  userPresets.push({ name, p: paramsToPreset(im.params) }); saveUserPresets(); presetCat = 'user'; try { localStorage.setItem('rawedit:pcat', 'user'); } catch { } renderPresetGrid(); toast('已儲存到「我的」');
+  userPresets.push({ name, p: paramsToPreset(im.params) }); saveUserPresets(); presetCat = 'user'; presetUI.edit = false; try { localStorage.setItem('rawedit:pcat', 'user'); } catch { } renderPresetGrid(); toast('已儲存到「我的」');
 }
 function saveUserPresets() { try { localStorage.setItem('rawedit:presets', JSON.stringify(userPresets)); } catch { } }
 
@@ -1105,13 +1168,13 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
   try {
     await decoder.init(); const v = decoder.version, n = decoder.cameras; decoder.terminate();
     $('#caps').textContent = `LibRaw ${v} · 支援 ${n} 款相機 · WebGL2 ✓ · 最大材質 ${renderer.maxTex}px` + (IS_TOUCH ? ' · 觸控模式' : '');
-    $('#about').innerHTML = `RAW Editor — 單一 HTML 檔、純瀏覽器運作，不上傳任何資料。<br>解碼：LibRaw ${v}（LGPL 2.1 / CDDL 1.0），WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。<br>調色：WebGL2，OkLab 色彩空間。匯出：內建串流 JPEG 編碼器（4:4:4）。<br>快捷鍵：Ctrl+Z 復原、Ctrl+Shift+Z 重做、空白鍵/\\ 比較原圖、← → 切換照片、0 符合視窗、滑桿連點兩下重設、Shift 拖曳微調。`;
+    $('#about').innerHTML = `RAW Editor — 單一 HTML 檔、純瀏覽器運作，不上傳任何資料。<br>解碼：LibRaw ${v}（LGPL 2.1 / CDDL 1.0），WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。<br>調色：WebGL2，OkLab 色彩空間。匯出：內建串流 JPEG 編碼器（4:4:4）。<br>膠片模擬 LUT：改編自 RawTherapee Film Simulation Collection（Pat David、Pavlov Dmitry、Michael Ezra，CC BY-SA 4.0）、t3mujinpack（MIT）、FilmSim（CC0），詳見 FILM_LUTS.md。<br>快捷鍵：Ctrl+Z 復原、Ctrl+Shift+Z 重做、空白鍵/\\ 比較原圖、← → 切換照片、0 符合視窗、滑桿連點兩下重設、Shift 拖曳微調。`;
   } catch (e) { $('#caps').textContent = '解碼器初始化失敗：' + e.message; console.error(e); }
 })();

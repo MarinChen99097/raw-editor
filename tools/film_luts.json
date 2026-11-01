@@ -1,0 +1,203 @@
+{
+ "size": 33,
+ "items": [
+  {
+   "id": "fuji_provia_100f",
+   "name": "Provia 100F",
+   "d": "富士正片 · 自然清爽",
+   "amount": 100,
+   "stock": "Fujifilm Provia 100F (slide)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Fuji/Fuji Provia 100F.png",
+   "type": "hald"
+  },
+  {
+   "id": "fuji_velvia_50",
+   "name": "Velvia 50",
+   "d": "富士正片 · 濃郁飽和、風景",
+   "amount": 100,
+   "stock": "Fujifilm Velvia 50 (slide)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Fuji/Fuji Velvia 50.png",
+   "type": "hald"
+  },
+  {
+   "id": "fuji_astia_100f",
+   "name": "Astia 100F",
+   "d": "富士正片 · 柔和膚色",
+   "amount": 100,
+   "stock": "Fujifilm Astia 100F (slide)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Fuji/Fuji Astia 100F.png",
+   "type": "hald"
+  },
+  {
+   "id": "fuji_superia_400",
+   "name": "Superia 400",
+   "d": "富士負片 · 日常、青綠調",
+   "amount": 100,
+   "stock": "Fujifilm Superia 400 (C-41)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Fuji/Fuji Superia 400 2.png",
+   "type": "hald"
+  },
+  {
+   "id": "fuji_pro_400h",
+   "name": "Pro 400H",
+   "d": "富士負片 · 粉嫩通透",
+   "amount": 100,
+   "stock": "Fujifilm Pro 400H (C-41)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Fuji/Fuji 400H 2.png",
+   "type": "hald"
+  },
+  {
+   "id": "classic_chrome_like",
+   "name": "經典正片風",
+   "d": "Classic Chrome 近似 · 低飽和紀實",
+   "amount": 100,
+   "stock": "Fujifilm X-T1 'Classic Chrome' in-camera simulation (approximation)",
+   "src": "filmsim",
+   "license": "CC0-1.0",
+   "file": "lut_src/sguyader_filmsim/Classic_Chrome.tif",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_portra_160",
+   "name": "Portra 160",
+   "d": "柯達人像 · 細膩自然",
+   "amount": 100,
+   "stock": "Kodak Portra 160 (C-41)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Kodak/Kodak Portra 160 2.png",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_portra_400",
+   "name": "Portra 400",
+   "d": "柯達人像 · 暖膚柔和",
+   "amount": 100,
+   "stock": "Kodak Portra 400 (C-41)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Kodak/Kodak Portra 400 2.png",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_ektar_100",
+   "name": "Ektar 100",
+   "d": "柯達 · 高飽和、鮮豔",
+   "amount": 100,
+   "stock": "Kodak Ektar 100 (C-41)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Kodak/Kodak Ektar 100.png",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_gold_200",
+   "name": "Gold 200",
+   "d": "柯達 · 金黃暖調",
+   "amount": 60,
+   "stock": "Kodak Gold 200 (C-41)",
+   "src": "t3mujinpack",
+   "license": "MIT",
+   "file": "lut_src/t3mujinpack/t3mujinpack - Color Negative - Kodak Gold 200.png",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_kodachrome_64",
+   "name": "Kodachrome 64",
+   "d": "柯達正片 · 經典濃郁紅黃",
+   "amount": 100,
+   "stock": "Kodak Kodachrome 64 (K-14 slide)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Kodak/Kodak Kodachrome 64.png",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_ektachrome_100vs",
+   "name": "Ektachrome 100VS",
+   "d": "柯達正片 · 鮮豔飽和",
+   "amount": 100,
+   "stock": "Kodak Ektachrome 100VS (E-6 slide)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Kodak/Kodak Ektachrome 100 VS.png",
+   "type": "hald"
+  },
+  {
+   "id": "kodak_trix_400",
+   "name": "Tri-X 400",
+   "d": "柯達黑白 · 經典街拍",
+   "amount": 100,
+   "stock": "Kodak Tri-X 400 (B&W)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Black-and-White/Kodak/Kodak TRI-X 400 2.png",
+   "type": "hald"
+  },
+  {
+   "id": "ilford_hp5",
+   "name": "HP5 Plus",
+   "d": "Ilford 黑白 · 柔和中反差",
+   "amount": 100,
+   "stock": "Ilford HP5 Plus 400 (B&W)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Black-and-White/Ilford/Ilford HP5 2.png",
+   "type": "hald"
+  },
+  {
+   "id": "ilford_delta_400",
+   "name": "Delta 400",
+   "d": "Ilford 黑白 · 細緻銳利",
+   "amount": 100,
+   "stock": "Ilford Delta 400 (B&W)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Black-and-White/Ilford/Ilford Delta 400.png",
+   "type": "hald"
+  },
+  {
+   "id": "polaroid_px70",
+   "name": "Polaroid PX-70",
+   "d": "拍立得 · 黃亮部、青陰影",
+   "amount": 70,
+   "stock": "Impossible/Polaroid PX-70 (SX-70 integral instant)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Polaroid/Polaroid PX-70 3.png",
+   "type": "hald"
+  },
+  {
+   "id": "polaroid_669",
+   "name": "Polaroid 669",
+   "d": "撕拉片 · 褪色復古",
+   "amount": 100,
+   "stock": "Polaroid 669 (peel-apart instant)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Polaroid/Polaroid 669 3.png",
+   "type": "hald"
+  },
+  {
+   "id": "fuji_fp100c",
+   "name": "FP-100C",
+   "d": "富士撕拉片 · 清冷高飽和",
+   "amount": 100,
+   "stock": "Fujifilm FP-100C (peel-apart instant)",
+   "src": "rawtherapee",
+   "license": "CC BY-SA 4.0",
+   "file": "lut_src/rawtherapee/Color/Fuji/Fuji FP-100c 3.png",
+   "type": "hald"
+  }
+ ]
+}

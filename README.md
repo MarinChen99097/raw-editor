@@ -50,11 +50,13 @@ iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接
 - 效果：清晰度、紋理、去朦朧、褪色（霧面）、暈影、顆粒
 - 細節：銳利化、明度降噪、色彩降噪
 - 裁切：90° 旋轉、翻轉、拉直角度、固定長寬比、拖曳裁切框
-- 預設集（懶人調色）：47 個，分成基本、富士底片模擬、日系、電影感、經典底片、黑白六類，另有「我的」放自訂預設。每張卡片都用你目前的照片即時預覽。
+- 預設集（懶人調色）：63 個滑桿預設，分成基本、富士底片模擬、日系、電影感、經典底片、黑白、大師風格七類，再加 18 款「膠片模擬」底片 LUT，另有「我的」放自訂預設。每張卡片都用你目前的照片即時預覽。按「管理」可以逐個或整類隱藏不想看到的預設。
   - 富士：Provia、Velvia、Astia、經典正片、經典負片、懷舊負片、Pro Neg Hi／Std、Eterna、Eterna 漂白、Reala Ace、Acros。
   - 日系：日系清新、空氣感、日系膠片、奶油肌、夏日青藍、奶茶色、霧面日系、清新綠意。
   - 電影感：懷舊電影、港風王家衛、港風暖黃、青橙電影、復古褪色、暗黑 Moody、夜景霓虹、復古暖調、冷調藍夜。
   - 底片：Portra 400、Gold 200、Ektar 100、Superia 400、Pro 400H、CineStill 800T、淡雅負片、鮮明底片。黑白：Tri-X 400、HP5 Plus、黑白經典、黑白高反差。
+  - 大師風格：森山大道、何藩、濱田英明、川內倫子、植田正治、Saul Leiter、Eggleston、McCurry、Fred Herzog、Meyerowitz、Alex Webb、Ansel Adams、布列松、Lindbergh、Wes Anderson、Roger Deakins。只模仿色調與質感，構圖與題材做不成預設。
+  - 膠片模擬（LUT）：Provia、Velvia、Astia、Superia、Pro 400H、經典正片風、Portra 160／400、Ektar、Gold 200、Kodachrome 64、Ektachrome 100VS、Tri-X、HP5、Delta 400、Polaroid PX-70／669、FP-100C。在你所有調整之後套用，可用「膠片強度」調整或移除，也能和滑桿預設一起用。來源與授權見 [FILM_LUTS.md](FILM_LUTS.md)。
   - 預設只是幫你把曝光、對比、HSL、曲線、色調分級等滑桿拉好，套用後每個滑桿都能再調。換別的預設會取代、不會疊加，手動調過的滑桿會保留；「強度」可調 0–150%。
   - 數值來自 GitHub 上的 Lightroom／darktable／RawTherapee 預設檔、富士官方說明、Fuji X Weekly 和中日文調色教學，換算方式與每個預設的出處見 [PRESETS.md](PRESETS.md)。都是外觀近似，不是相機實測。
 - 自訂預設集可匯出／匯入 JSON
@@ -85,3 +87,5 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 ## 授權
 
 LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。本程式其餘部分 MIT。
+
+膠片模擬的 LUT 資料不屬於本專案的 MIT 授權：大部分改編自 RawTherapee Film Simulation Collection，依 CC BY-SA 4.0 釋出；Gold 200 來自 t3mujinpack（MIT），經典正片風來自 FilmSim（CC0）。詳見 [FILM_LUTS.md](FILM_LUTS.md)。

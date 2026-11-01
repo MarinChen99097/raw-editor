@@ -305,3 +305,148 @@
   - https://fujixweekly.com/2022/03/23/fujifilm-x-trans-iv-film-simulation-recipe-ilford-hp5-plus-400/
   - https://www.ilfordphoto.com/film-review-ilford-hp5-plus-emulsive/
 
+## 大師風格（只模仿色調與質感，構圖與題材做不成預設）
+
+- **森山大道風**（Daido Moriyama，可信度 medium）：Daido Moriyama · 粗顆粒高反差黑白。
+  - https://dantesisofo.com/wp-content/uploads/2023/07/Ricoh-GRIII-Camera-Settings-for-Street-Photography.pdf
+  - https://erickimphotography.com/blog/2022/02/25/the-best-ricoh-gr-iii-ricoh-gr-iiix-technical-settings/
+  - https://www.digitalcameraworld.com/cameras/compact-cameras/did-you-know-the-ricoh-gr-iii-has-a-daido-moriyama-mode
+  - http://petetakespictures.com/blog/filmandvision
+  - https://www.shuttergroove.com/fujifilm-recipes/monochrome-recipes/one-for-the-road-film-recipe-fujifilm-xt4/
+  - https://github.com/fmeyer/lightroom-plugins/blob/master/Moriyama%201.lrtemplate
+  - https://github.com/fmeyer/lightroom-plugins/blob/master/Moriyama%204.lrtemplate
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Black-White/Kodak%20Tri-X%20400%20%2B2.xmp
+  - https://thephotographersgallery.org.uk/node/2317
+  - https://www.ifanr.com/app/651354
+  - https://blog.qagoma.qld.gov.au/?p=11334
+- **何藩風**（Fan Ho，可信度 low）：Fan Ho · 光影朦朧的港式黑白。
+  - https://en.wikipedia.org/wiki/Fan_Ho
+  - https://mplus.org.hk/en/magazine/10-facts-about-the-photographer-who-documented-1950s-and-60s-hong-kong
+  - https://www.finestresullarte.info/exhibitions/an-exhibition-by-photographer-fan-ho-in-turin-100-images-depict-urban-hong-kong
+  - https://aboutphotography.blog/blog/2020/2/14/edit-or-not-to-edit-thats-the-question-story-behind-approaching-shadow-by-fan-ho
+  - https://www.sandmarc.com/blogs/iphone-photography/how-to-take-photos-like-photographer-fan-ho
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Fan%20Ho.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/research/Fan-Ho/community-recipes.md
+- **濱田英明風**（Hideaki Hamada，可信度 medium）：Hideaki Hamada · 柔亮自然、Portra 感。
+  - https://the189.com/feature/interview-with-photographer-hideaki-hamada
+  - https://www.dcfever.com/column/read.php?id=2046
+  - https://www.dcfever.com/column/read.php?id=4244
+  - https://rangefinderonline.com/?p=35225
+  - https://vsco.co/blog/hideaki-hamada-vsco-film
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Color-Negative/Kodak%20Portra%20400%20120.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Color-Negative/Kodak%20Portra%20400%20%2B2.xmp
+- **川內倫子風**（Rinko Kawauchi，可信度 low）：Rinko Kawauchi · 淡雅過曝、粉嫩。
+  - https://www.dcfever.com/column/read.php?id=2046
+  - https://www.shephe.com/preset/rinko-kawauchi-lightroom-presets/
+  - https://en.wikipedia.org/wiki/Rinko_Kawauchi
+  - https://www.the-berliner.com/art/illuminating-the-mundane/
+  - https://www.1stdibs.com/blogs/the-study/rinko-kawauchi
+  - https://www.nippon.com/ja/images/i00053/
+  - https://aperture.org/editorial/rinko-kawauchi-my-favorite-color-is-blue/
+- **植田正治風**（Shoji Ueda，可信度 low）：Shoji Ueda · 柔和平靜的黑白。
+  - https://getnavi.jp/capa/pickup/260701ueda/
+  - https://en.wikipedia.org/wiki/Sh%C5%8Dji_Ueda
+  - https://emuseum.mfah.org/objects/26893/portrait-on-a-sand-dune
+  - https://dc.watch.impress.co.jp/docs/news/exhibition-pickup/1368088.html
+  - https://www.tokinowasuremono.com/blog/31775
+- **索爾・雷特風**（Saul Leiter，可信度 medium）：Saul Leiter · 低調畫意、紅色點綴。
+  - https://www.fujixpassion.com/2024/01/11/the-saul-leiter-way/
+  - https://community.fujixweekly.com/recipes/recipe/92
+  - https://fujixweekly.com/2026/05/02/summer-of-59-a-fujifilm-recipe-for-fifth-generation-cameras/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Saul%20Leiter.xmp
+  - https://emuseum.mfah.org/objects/129101/visit
+  - https://www.equinoxgallery.com/wp-content/uploads/2024/02/When-Master-Photographers-Spin-the-Color-Wheel-The-New-York-Times.pdf
+  - https://www.exibartstreet.com/?p=8251
+  - https://www.fredmiranda.com/forum/topic/1931734/
+- **艾格斯頓風**（William Eggleston，可信度 medium）：William Eggleston · 濃郁染印色彩。
+  - http://petetakespictures.com/blog/filmandvision
+  - https://www.fujirumors.com/this-guy-fine-tuned-his-fujifilm-film-simulation-settings-inspired-by-the-work-of-great-film-photographers-see-chrome-eggleston-more/
+  - https://www.thephoblographer.com/2026/10/15/i-made-the-william-eggleston-look-on-lumix-cameras/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/William%20Eggleston.xmp
+  - https://en.wikipedia.org/wiki/The_Red_Ceiling
+  - https://fnewsmagazine.com/2010/04/the-dye-transfer-process/
+  - https://www.davidzwirner.com/exhibitions/2024/william-eggleston-the-last-dyes
+  - https://www.flickr.com/groups/88056259@N00/discuss/72157625504042884/
+  - https://www.threads.com/@sdw/post/DCHxably9Ef?hl=en
+- **麥凱瑞風**（Steve McCurry，可信度 high）：Steve McCurry · Kodachrome 濃暖。
+  - https://fujixweekly.com/2024/01/25/mccurry-kodachrome-a-fujifilm-x-trans-iv-film-simulation-recipe/
+  - https://github.com/namtonthat/fuji-x-weekly-simulation-profiles/blob/main/fuji_profiles/X-Trans-IV/McCurry%20Kodachrome.FP1
+  - https://www.whatcameragear.com/2025/05/steve-mccurry.html
+  - https://theeditingstudio.co/blog/kodachrome-film-lightroom-preset-guide
+  - https://x-alchemy.app/academy/film-look/kodachrome-look
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Steve%20McCurry.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/McCurry-Kodachrome.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Slide/Kodachrome%2064.xmp
+  - https://seimeffects.com/2025/02/15/kodachome-64-preset-lightroom-captureone-style-recipe/
+  - https://en.wikipedia.org/wiki/Afghan_Girl
+- **赫佐格風**（Fred Herzog，可信度 medium）：Fred Herzog · 50 年代街頭 Kodachrome。
+  - https://onecameraonelens.com/fuji/mga-fred-herzog-kodachrome-v1/
+  - https://onecameraonelens.com/fuji/mga-fred-herzog-kodachrome-v2/
+  - https://onecameraonelens.com/2020/11/06/lockdown-street-photography-port-talbot-with-frank-herzog-kodachrome/
+  - https://thecanadianencyclopedia.ca/en/article/fred-herzog
+  - https://www.theglobeandmail.com/arts/lotusland-confidential-images-from-fred-herzog/article4183720
+  - https://vanartgallery.bc.ca/exhibitions/fred-herzog-vancouver-photographs
+  - https://www.fredmiranda.com/forum/topic/1667927/
+  - https://legalaffairs.org/article.php?id=37742
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Decade/Kodachrome%20Mid-Century.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Slide/Kodachrome%2064.xmp
+- **麥爾羅維茨風**（Joel Meyerowitz，可信度 low）：Joel Meyerowitz · 柔光粉彩。
+  - https://www.blind-magazine.com/news/fifty-years-ago-joel-meyerowitz-tipped-into-the-light/
+  - https://www.phaidon.com/en-us/blogs/phaidon-archive/the-camera-that-captured-cape-cod-light
+  - https://scma.smith.edu/blog/eye-street-joel-meyerowitz
+  - https://www.kevinmullinsphotography.co.uk/blog/fujifilm-meyerowitz-jpeg-settings
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Joel%20Meyerowitz.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Color-Negative/Kodak%20Vericolor%20III%20160.xmp
+  - https://you.stonybrook.edu/audreybarke/project-2-the-natural-environment-as-still-life-landscape
+- **亞歷克斯・韋伯風**（Alex Webb，可信度 medium）：Alex Webb · 濃烈色彩、深黑陰影。
+  - https://www.shutterbug.com/node/371923
+  - https://www.lensculture.com/books/1229-hot-light-half-made-worlds-photographs-from-the-tropics
+  - https://leica-camera.com/de-AT/Leica-Galerien/Leica-Galerie-Wetzlar/News-Program/2019/The-suffering-of-light-%7C-Alex-Webb
+  - https://collectordaily.com/alex-webb-the-suffering-of-light-aperture
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Alex%20Webb.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Slide/Kodachrome%2025.xmp
+  - https://theeditingstudio.co/blog/kodachrome-film-lightroom-preset-guide
+  - https://www.fredmiranda.com/forum/topic/1667927/
+- **安瑟・亞當斯風**（Ansel Adams，可信度 high）：Ansel Adams · 全階調黑白、天空壓暗。
+  - https://en.wikipedia.org/wiki/Monolith,_the_Face_of_Half_Dome
+  - https://johnsexton.com/newsletter04-2012.html
+  - https://cdn.shutterbug.com/node/454398
+  - https://www.onlandscape.co.uk/?p=65470
+  - https://www.csmonitor.com/1986/0314/lansel.html
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Ansel%20Adams%20Zone%20System.xmp
+  - https://github.com/betoon/photo_lab/blob/main/plugin/Ansel%20Adams%20Inspired/Ansel%20Adams%20Zone%20System.xmp
+  - https://www.lightroomqueen.com/community/threads/black-white-filters-in-lightroom-development-presets.2334/
+  - https://digital-photography-school.com/understanding-black-white-filters-lightroom/
+  - https://www.shutterbug.com/node/580698
+- **布列松風**（Henri Cartier-Bresson，可信度 medium）：Cartier-Bresson · 經典街頭黑白。
+  - https://archive.artic.edu/cartier-bresson/prints
+  - https://www.photrio.com/forum/threads/hcbs-film.164600/
+  - https://www.l-camera-forum.com/topic/131810-hcb-film
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Henri%20Cartier-Bresson.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Black-White/Kodak%20Tri-X%20400.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Black-White/Kodak%20Plus-X%20125.xmp
+  - https://theeditingstudio.co/blog/black-and-white-film-lightroom-preset-complete-guide-2026
+- **林德伯格風**（Peter Lindbergh，可信度 low）：Peter Lindbergh · 電影感時尚黑白。
+  - https://en.wikipedia.org/wiki/Peter_Lindbergh
+  - https://www.businessoffashion.com/articles/news-analysis/photographer-peter-lindbergh-dies-at-74/
+  - https://www.pressreader.com/italy/vogue-italy/20180704/285237373552716
+  - https://www.masterworks.com/academy/artists/peter-lindbergh
+  - https://rangefinderforum.com/threads/peter-lindberg-portrait-style-help.176566/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Photographer/Peter%20Lindbergh.xmp
+  - https://phlearn.com/tutorial/process-black-white-photos-lightroom/
+  - https://digital-photography-school.com/achieve-black-white-film-lightroom/
+- **魏斯・安德森風**（Wes Anderson，可信度 medium）：Wes Anderson · 粉彩暖黃、童話色。
+  - https://github.com/shawonashraf/lr-presets/blob/main/Wes%20Anderson.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Wes%20Anderson%20Pastel.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/research/Wes-Anderson-Pastel/community-recipes.md
+  - https://www.jgrnstn.com/articles-guides/5-ways-to-get-a-wes-anderson-effect-in-lightroom
+  - https://imagen-ai.com/valuable-tips/wes-anderson-lightroom-presets/
+  - https://gridfiti.com/wes-anderson-lightroom-presets/
+  - https://www.digitaling.com/articles/12370.html
+- **狄金斯風**（Roger Deakins，可信度 low）：Roger Deakins · 自然電影感。
+  - https://www.rogerdeakins.com/forums/topic/luts/
+  - https://www.rogerdeakins.com/?p=217119
+  - https://theasc.com/magazine/april05/conundrum2/image15.html
+  - https://petapixel.com/roger-deakins-photography-interview/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Kodak-2383-Print-Film.xmp
+

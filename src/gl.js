@@ -29,6 +29,10 @@ class Renderer {
     this.vao = vao;
     this.curveTex = this._tex2D(gl.RGBA16F, 256, 1, gl.LINEAR, gl.CLAMP_TO_EDGE);
     this.emptyBrush = this._tex2D(gl.RGBA8, 1, 1, gl.NEAREST, gl.CLAMP_TO_EDGE);
+    // film emulation LUTs (3D textures, keyed by id); a 1x1x1 placeholder keeps the sampler complete when none is used
+    this.luts = new Map();
+    this.emptyLut = gl.createTexture(); gl.bindTexture(gl.TEXTURE_3D, this.emptyLut);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); gl.bindTexture(gl.TEXTURE_3D, null);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
     this.brush = null;      // {tex,w,h}
     this.src = null;        // {tex,w,h,scale}
@@ -116,6 +120,18 @@ class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.blur = from; this.blurB = to;
   }
+  // rgb: Uint8Array size^3*3, red fastest (index = (b*size + g)*size + r)
+  setFilmLUT(id, size, rgb) {
+    const gl = this.gl; if (this.luts.has(id)) return;
+    const tex = gl.createTexture(); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, size, size, size, 0, gl.RGB, gl.UNSIGNED_BYTE, rgb);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindTexture(gl.TEXTURE_3D, null); gl.activeTexture(gl.TEXTURE0);
+    this.luts.set(id, { tex, size });
+  }
   setCurveLUT(lut /* Float32Array 256*4, 0..1 */) {
     const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, this.curveTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     const f = lut instanceof Float32Array ? lut : Float32Array.from(lut, v => v / 255);
@@ -165,6 +181,8 @@ class Renderer {
     if (n) { gl.uniform4fv(u.u_mG1, U.mG1); gl.uniform4fv(u.u_mG2, U.mG2); gl.uniform4fv(u.u_mA, U.mA); gl.uniform4fv(u.u_mB, U.mB); gl.uniform4fv(u.u_mC, U.mC); gl.uniform4fv(u.u_mD, U.mD); }
     gl.uniform1i(u.u_showMask, U.showMask ?? -1); gl.uniform1i(u.u_maskDetail, U.maskDetail ? 1 : 0); gl.uniform1i(u.u_outMode, 0);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, (U.useBrush && this.brush) ? this.brush.tex : this.emptyBrush); gl.uniform1i(u.u_brush, 3);
+    { const L = U.lutId ? this.luts.get(U.lutId) : null; gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, L ? L.tex : this.emptyLut); gl.uniform1i(u.u_lut, 4);
+      gl.uniform1f(u.u_lutAmt, L ? Math.max(0, Math.min(1, U.lutAmt)) : 0); gl.uniform1f(u.u_lutN, L ? L.size : 2); }
     gl.activeTexture(gl.TEXTURE0);
   }
   // Render the developed image (geometry G: {outW,outH,m}) into a result texture. quality<1 renders smaller.

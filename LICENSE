@@ -24,3 +24,8 @@ LibRaw (src/vendor/libraw.wasm, embedded in RawEditor.html) is licensed under
 LGPL 2.1 or CDDL 1.0; see src/vendor/LICENSE.LGPL, src/vendor/LICENSE.CDDL and
 src/vendor/COPYRIGHT. The WebAssembly build comes from @colorhythm/libraw-wasm (MIT),
 see src/vendor/LICENSE.libraw-wasm.txt.
+
+---
+The film emulation LUT data in src/filmluts.js (and the copy embedded in RawEditor.html) is NOT covered by the MIT
+licence above. It is adapted from the RawTherapee Film Simulation Collection (CC BY-SA 4.0), t3mujinpack (MIT) and
+FilmSim (CC0 1.0); see FILM_LUTS.md for attribution and terms.

@@ -86,6 +86,8 @@ uniform vec2  u_fullSize;       // full image size in pixels
 uniform sampler2D u_blur;       // blurred perceptual luminance of full image
 uniform sampler2D u_curve;      // 256x1 RGBA16F: r=RGB curve, g/b/a = R/G/B curves
 uniform sampler2D u_brush;      // brush masks, one per channel (normalised full-image coords)
+uniform highp sampler3D u_lut;  // film emulation 3D LUT, display-referred sRGB in and out
+uniform float u_lutAmt, u_lutN;  // strength 0..1, LUT size per axis
 uniform vec2  u_outSize;
 uniform mat3  u_m;              // out pixel -> full-image pixel (lens-corrected space)
 uniform float u_exposure;       // linear multiplier
@@ -353,6 +355,10 @@ void main(){
 
   // --- output encode ---
   vec3 e = srgbOETF(c);
+  if(u_lutAmt > 0.001){ // film emulation: user sliders act first, then the image goes 'through the film'; R/G/B curves and grain follow
+    vec3 q = clamp(e, 0.0, 1.0)*((u_lutN - 1.0)/u_lutN) + 0.5/u_lutN;
+    e = mix(e, texture(u_lut, q).rgb, u_lutAmt);
+  }
   e.r = texture(u_curve, vec2(e.r*(255.0/256.0)+0.5/256.0, 0.5)).g;
   e.g = texture(u_curve, vec2(e.g*(255.0/256.0)+0.5/256.0, 0.5)).b;
   e.b = texture(u_curve, vec2(e.b*(255.0/256.0)+0.5/256.0, 0.5)).a;
