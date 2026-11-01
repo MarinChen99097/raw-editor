@@ -84,8 +84,28 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 - `src/app.js`：UI、幾何（旋轉／拉直／裁切）、狀態、匯出流程
 - `src/presets.js`、`src/curve.js`
 
+## Lightroom 功能對照
+
+這一版照 Lightroom 的修圖功能補齊，大部分演算法參考 [LightCraft](https://github.com/storytold/lightcraft)（MIT）：
+
+- **光線**：描述檔（色彩、中性、鮮豔、風景、人像、單色、平淡）與強度；RAW 有類似 Lightroom 的基礎色調曲線（亮部柔和過渡）；「自動」一鍵調整。
+- **白平衡**：原廠、自動、吸管（點一下應該是白或灰的地方）。
+- **曲線**：區域曲線（亮部／亮調／暗調／陰影＋三個分界）加上 RGB、紅、綠、藍點曲線。
+- **顏色**：HSL、點顏色（吸取顏色後單獨調整）、色調分級三區＋整體色輪與混合、相機校正（陰影色調、紅綠藍原色）。
+- **效果與細節**：暈影圓度與亮部優先、顆粒粗糙度、銳利化遮色。
+- **局部調整**：線性、放射狀、筆刷、天空、主體（AI）、背景（AI），可再用畫筆加入、橡皮擦減去；顏色範圍、亮度範圍；每個遮罩可調色相、降噪、色彩疊加與整體強度。
+- **修復**：污點修復與仿製（自動挑選來源）、紅眼、寵物眼、自動偵測底片灰塵。
+- **幾何**：變形（垂直、水平、旋轉、長寬比、縮放、位移）、Upright（自動、水平、垂直、完整）、自動拉直、限制裁切、裁切參考線、電影長寬比。
+- **流程**：歷史紀錄（點一下回到那一步）、快照、選擇性貼上設定、剪裁警告（點直方圖）、批次匯出後一次存到相簿、PNG 16 位元匯出。
+
+**AI 主體／背景**：第一次使用時會從網路下載 onnxruntime-web（約 1.8 MB）和 U²-Net-P 模型（約 4.6 MB），之後存在瀏覽器裡離線可用。運算全部在你的裝置上，照片不會上傳。iPhone 上單執行緒運算約 2–5 秒。沒有網路時會改用一般演算法。
+
+**還沒有做的**：AI 降噪、超解析度、鏡頭模糊（景深）、人物部位與點選物件的 AI 遮罩、HDR／全景合併、內容感知填補、Lightroom 的鏡頭描述檔資料庫。
+
 ## 授權
 
 LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。本程式其餘部分 MIT。
+
+部分修圖演算法（基礎色調、描述檔、自動調整、污點修復、紅眼、灰塵偵測、Upright、自動拉直、天空／主體遮罩）改編自 LightCraft，Copyright (c) 2026 ArtCraft Team and the LightCraft contributors，MIT License。AI 主體遮罩在使用時才下載：onnxruntime-web（MIT）與 U²-Net-P 權重（Apache-2.0，rembg 的 ONNX 匯出為 MIT），不包含在本 repo 裡。
 
 膠片模擬的 LUT 資料不屬於本專案的 MIT 授權：大部分改編自 RawTherapee Film Simulation Collection，依 CC BY-SA 4.0 釋出；Gold 200 來自 t3mujinpack（MIT），經典正片風來自 FilmSim（CC0）。詳見 [FILM_LUTS.md](FILM_LUTS.md)。

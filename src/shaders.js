@@ -130,7 +130,7 @@ uniform vec4  u_mB[8];          // whites, blacks, temp, tint
 uniform vec4  u_mC[8];          // saturation, clarity, dehaze, texture
 uniform vec4  u_mD[8];          // sharpen, luminance range low, high, opacity
 uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius (radius <= 0: off)
-uniform vec4  u_mF[8];          // hue shift, noise reduction, -, -
+uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -253,7 +253,7 @@ void main(){
 
   // --- local adjustments: luminance range + accumulate ---
   float Y0 = enc(dot(c*u_exposure*u_wb, LUMA));
-  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, wShow=0.0;
+  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, lColA=0.0, lColB=0.0, wShow=0.0;
   vec3 lab0 = vec3(0.0); if(u_anyCR == 1) lab0 = lin2oklab(max(c*u_exposure*u_wb, 0.0));
   for(int i=0;i<8;i++){
     if(i >= u_nMasks) break;
@@ -262,7 +262,7 @@ void main(){
     if(i == u_showMask) wShow = w;
     lExp += w*u_mA[i].x; lCon += w*u_mA[i].y; lHi += w*u_mA[i].z; lSh += w*u_mA[i].w;
     lWh += w*u_mB[i].x; lBl += w*u_mB[i].y; lTemp += w*u_mB[i].z; lTint += w*u_mB[i].w;
-    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x;
+    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x; lColA += w*u_mF[i].z; lColB += w*u_mF[i].w;
   }
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
@@ -384,6 +384,7 @@ void main(){
     float wH = smoothstep(cH - hH, cH + hH, x);
     float wM = max(0.0, 1.0 - wS - wH);
     lab += wS*u_gradeS + wM*u_gradeM + wH*u_gradeH + u_gradeG;
+    lab.yz += vec2(lColA, lColB); // local colour overlay (masks)
   }
   c = oklab2lin(lab);
   c = max(c, 0.0);

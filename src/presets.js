@@ -32,7 +32,7 @@ const DEFAULTS = ({
 // defaults for one local-adjustment mask (slider paths 'M.xxx' resolve against the active mask)
 const PC_DEFAULTS = { hue: 0, sat: 0, lum: 0, range: 40 };
 const MASK_DEFAULTS = { invert: false, opacity: 100, lumLo: 0, lumHi: 100, feather: 50, angle: 0, amount: 100, colorRange: { on: false, L: 0, a: 0, b: 0, amt: 40 },
-  adj: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, texture: 0, sharpen: 0, hue: 0, noise: 0 } };
+  adj: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, texture: 0, sharpen: 0, hue: 0, noise: 0, colorHue: 30, colorSat: 0 } };
 const HSL_NAMES = ['紅', '橙', '黃', '綠', '青', '藍', '紫', '洋紅'];
 const HSL_COLORS = ['#ff4d4d', '#ff9a3c', '#ffe04d', '#5fd65f', '#3fd0d0', '#4d7cff', '#a35cff', '#ff5cc8'];
 

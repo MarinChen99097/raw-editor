@@ -29,3 +29,9 @@ see src/vendor/LICENSE.libraw-wasm.txt.
 The film emulation LUT data in src/filmluts.js (and the copy embedded in RawEditor.html) is NOT covered by the MIT
 licence above. It is adapted from the RawTherapee Film Simulation Collection (CC BY-SA 4.0), t3mujinpack (MIT) and
 FilmSim (CC0 1.0); see FILM_LUTS.md for attribution and terms.
+
+---
+Portions of the editing algorithms (base tone map, profiles, auto tone / white balance, spot healing, red eye,
+dust detection, Upright, auto straighten, sky / subject masks) are derived from LightCraft
+(https://github.com/storytold/lightcraft), Copyright (c) 2026 ArtCraft Team and the LightCraft contributors,
+licensed under the MIT License (same terms as above).

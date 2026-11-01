@@ -749,7 +749,7 @@ uniform vec4  u_mB[8];          // whites, blacks, temp, tint
 uniform vec4  u_mC[8];          // saturation, clarity, dehaze, texture
 uniform vec4  u_mD[8];          // sharpen, luminance range low, high, opacity
 uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius (radius <= 0: off)
-uniform vec4  u_mF[8];          // hue shift, noise reduction, -, -
+uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -872,7 +872,7 @@ void main(){
 
   // --- local adjustments: luminance range + accumulate ---
   float Y0 = enc(dot(c*u_exposure*u_wb, LUMA));
-  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, wShow=0.0;
+  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, lColA=0.0, lColB=0.0, wShow=0.0;
   vec3 lab0 = vec3(0.0); if(u_anyCR == 1) lab0 = lin2oklab(max(c*u_exposure*u_wb, 0.0));
   for(int i=0;i<8;i++){
     if(i >= u_nMasks) break;
@@ -881,7 +881,7 @@ void main(){
     if(i == u_showMask) wShow = w;
     lExp += w*u_mA[i].x; lCon += w*u_mA[i].y; lHi += w*u_mA[i].z; lSh += w*u_mA[i].w;
     lWh += w*u_mB[i].x; lBl += w*u_mB[i].y; lTemp += w*u_mB[i].z; lTint += w*u_mB[i].w;
-    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x;
+    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x; lColA += w*u_mF[i].z; lColB += w*u_mF[i].w;
   }
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
@@ -1003,6 +1003,7 @@ void main(){
     float wH = smoothstep(cH - hH, cH + hH, x);
     float wM = max(0.0, 1.0 - wS - wH);
     lab += wS*u_gradeS + wM*u_gradeM + wH*u_gradeH + u_gradeG;
+    lab.yz += vec2(lColA, lColB); // local colour overlay (masks)
   }
   c = oklab2lin(lab);
   c = max(c, 0.0);
@@ -1102,7 +1103,7 @@ const DEFAULTS = ({
 // defaults for one local-adjustment mask (slider paths 'M.xxx' resolve against the active mask)
 const PC_DEFAULTS = { hue: 0, sat: 0, lum: 0, range: 40 };
 const MASK_DEFAULTS = { invert: false, opacity: 100, lumLo: 0, lumHi: 100, feather: 50, angle: 0, amount: 100, colorRange: { on: false, L: 0, a: 0, b: 0, amt: 40 },
-  adj: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, texture: 0, sharpen: 0, hue: 0, noise: 0 } };
+  adj: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, texture: 0, sharpen: 0, hue: 0, noise: 0, colorHue: 30, colorSat: 0 } };
 const HSL_NAMES = ['紅', '橙', '黃', '綠', '青', '藍', '紫', '洋紅'];
 const HSL_COLORS = ['#ff4d4d', '#ff9a3c', '#ffe04d', '#5fd65f', '#3fd0d0', '#4d7cff', '#a35cff', '#ff5cc8'];
 
@@ -2196,7 +2197,7 @@ function lensFor(im, L) {
   if (im._lensKey !== key) { im._lensKey = key; im._lens = buildLensTable(im.lensMD, L, W, H); }
   return im._lens;
 }
-const MASK_TYPES = { linear: 0, radial: 1, brush: 2 };
+const MASK_TYPES = { linear: 0, radial: 1, brush: 2, sky: 2, subject: 2, background: 2 }; // 2 = raster (brush texture channel)
 function packMasks(U, masks) {
   const n = Math.min(8, masks.length); U.nMasks = n; if (!n) return;
   const A = () => new Float32Array(32); U.mG1 = A(); U.mG2 = A(); U.mA = A(); U.mB = A(); U.mC = A(); U.mD = A(); U.mE = A(); U.mF = A();
@@ -2205,7 +2206,7 @@ function packMasks(U, masks) {
     const m = masks[i], a = Object.assign({}, d.adj, m.adj), o = i * 4, t = MASK_TYPES[m.type] ?? 0;
     const k = (m.amount ?? 100) / 100; if (k !== 1) for (const key of Object.keys(a)) a[key] *= k; // mask amount scales every adjustment
     const cr = m.colorRange; if (cr && cr.on) { U.mE.set([cr.a, cr.b, cr.L, 0.02 + (cr.amt ?? 40) / 100 * 0.25], o); U.anyCR = true; }
-    U.mF.set([a.hue / 100, a.noise / 100, 0, 0], o);
+    { const cs = (m.adj && m.adj.colorSat || 0) / 100 * k, ch = okHueRad((m.adj && m.adj.colorHue) ?? 30); U.mF.set([a.hue / 100, a.noise / 100, Math.cos(ch) * 0.08 * cs, Math.sin(ch) * 0.08 * cs], o); }
     if (t === 0) U.mG1.set([m.x0, m.y0, m.x1, m.y1], o); else if (t === 1) U.mG1.set([m.cx, m.cy, m.rx, m.ry], o);
     U.mG2.set([t === 1 ? (m.angle || 0) * Math.PI / 180 : t === 2 ? m.ch : 0, (m.feather ?? d.feather) / 100, m.invert ? 1 : 0, t], o);
     U.mA.set([a.exposure, a.contrast / 100, a.highlights / 100, a.shadows / 100], o);
@@ -2503,14 +2504,15 @@ function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b 
 function refreshAll() { refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
-const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷' };
-const MASK_ICON = { linear: '▤', radial: '◎', brush: '✎' };
+const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷', sky: '天空', subject: '主體', background: '背景' };
+const MASK_ICON = { linear: '▤', radial: '◎', brush: '✎', sky: '☁', subject: '◉', background: '▢' };
 let localUI = {};
 const activeMask = () => { const im = CUR(); return im && state.maskSel >= 0 ? im.params.masks[state.maskSel] || null : null; };
 function buildLocalPanel(sec) {
   sec.append(hdr('局部調整', el('button', { onclick: () => { const im = CUR(); if (!im || !im.params.masks.length) return; if (!confirm('刪除這張照片的全部遮罩？')) return; im.params.masks = []; state.maskSel = -1; refreshAll(); commit(); } }, '全部刪除')));
   sec.append(el('div', { class: 'toolbar addmask' },
-    el('button', { onclick: () => addMask('linear') }, '＋ ▤ 線性漸層'), el('button', { onclick: () => addMask('radial') }, '＋ ◎ 放射狀'), el('button', { onclick: () => addMask('brush') }, '＋ ✎ 筆刷')));
+    el('button', { onclick: () => addMask('linear') }, '＋ ▤ 線性漸層'), el('button', { onclick: () => addMask('radial') }, '＋ ◎ 放射狀'), el('button', { onclick: () => addMask('brush') }, '＋ ✎ 筆刷'),
+    el('button', { onclick: () => addMask('sky') }, '＋ ☁ 天空'), el('button', { onclick: () => addMask('subject') }, '＋ ◉ 主體（AI）'), el('button', { onclick: () => addMask('background') }, '＋ ▢ 背景（AI）')));
   localUI.chips = el('div', { class: 'chips maskchips' }); sec.append(localUI.chips);
   localUI.empty = el('div', { class: 'hint' }, '新增遮罩後，只有遮罩範圍內會套用下方的調整。線性漸層適合天空，放射狀適合主體或暗角，筆刷可以自由塗抹。');
   sec.append(localUI.empty);
@@ -2535,7 +2537,7 @@ function buildLocalPanel(sec) {
   ed.append(hdr('調整', el('button', { onclick: () => { const m = activeMask(); if (!m) return; m.adj = clone(MASK_DEFAULTS.adj); refreshAll(); commit(); } }, '重設')));
   const AS = [['exposure', '曝光', -4, 4, 0.01, fmt.ev], ['contrast', '對比'], ['highlights', '亮部'], ['shadows', '暗部'], ['whites', '白色'], ['blacks', '黑色'],
     ['temp', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3f78ff,#888,#ffb347)'], ['tint', '色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'],
-    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos]];
+    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos], ['colorHue', '色彩：色相', 0, 360, 1, fmt.deg, 'linear-gradient(90deg,#f66,#fc6,#cf6,#6f9,#6ff,#69f,#c6f,#f6c,#f66)'], ['colorSat', '色彩：濃度', 0, 100, 1, fmt.pos]];
   for (const [k, n, mn = -100, mx = 100, st = 1, f = fmt.int, g] of AS) ed.append(makeSlider('M.adj.' + k, n, mn, mx, st, f, g));
   ed.append(makeSlider('M.amount', '整體強度', 0, 200, 1, v => Math.round(v) + '%'));
   ed.append(hdr('範圍'));
@@ -2559,7 +2561,7 @@ function refreshLocalUI() {
   updateMaskChips();
   localUI.ed.style.display = m ? '' : 'none'; localUI.empty.style.display = m ? 'none' : '';
   if (!m) return;
-  localUI.geoRadial.style.display = m.type === 'radial' ? '' : 'none'; localUI.geoLinear.style.display = m.type === 'linear' ? '' : 'none'; localUI.geoBrush.style.display = m.type === 'brush' ? '' : 'none';
+  localUI.geoRadial.style.display = m.type === 'radial' ? '' : 'none'; localUI.geoLinear.style.display = m.type === 'linear' ? '' : 'none'; localUI.geoBrush.style.display = isRaster(m.type) ? '' : 'none';
   localUI.btnShow.classList.toggle('on', state.showMask); localUI.btnHide.classList.toggle('on', !!m.hidden); localUI.btnHide.textContent = m.hidden ? '已停用' : '停用'; localUI.btnInv.classList.toggle('on', !!m.invert);
   [...localUI.brushSeg.children].forEach(b => b.classList.toggle('on', (b.dataset.e === '1') === !!state.tool.erase));
   for (const [k, s] of sliders) if (k.startsWith('M.')) s.update();
@@ -2574,15 +2576,16 @@ function addMask(type) {
   const m = Object.assign(clone(MASK_DEFAULTS), { id: newId(), type });
   if (type === 'linear') { const a = iso(0.5, 0.15), b = iso(0.5, 0.55); Object.assign(m, { x0: a[0], y0: a[1], x1: b[0], y1: b[1] }); }
   else if (type === 'radial') { const c = iso(0.5, 0.5), e = iso(0.5 + 0.22 * Math.min(G.outW, G.outH) / G.outW, 0.5); const r = Math.hypot(e[0] - c[0], e[1] - c[1]); Object.assign(m, { cx: c[0], cy: c[1], rx: r * 1.25, ry: r, angle: 0 }); }
-  else { const used = new Set(ms.filter(x => x.type === 'brush').map(x => x.ch)); const ch = [0, 1, 2, 3].find(c => !used.has(c)); if (ch === undefined) { toast('最多 4 個筆刷遮罩'); return; } Object.assign(m, { ch, strokes: [] }); }
+  else { const used = new Set(ms.filter(x => isRaster(x.type)).map(x => x.ch)); const ch = [0, 1, 2, 3].find(c => !used.has(c)); if (ch === undefined) { toast('筆刷／天空／主體／背景遮罩合計最多 4 個'); return; } Object.assign(m, { ch, strokes: [] }, type === 'brush' ? {} : { base: { kind: type, ev: im.params.exposure || 0 } }); }
   ms.push(m); state.maskSel = ms.length - 1; state.showMask = true;
   refreshAll(); commit();
-  toast(type === 'brush' ? '在照片上塗抹要調整的區域' : '拖曳圓點調整範圍，再調整下方滑桿');
+  if (type === 'subject' || type === 'background') upgradeSubjectMask(m);
+  toast(type === 'brush' ? '在照片上塗抹要調整的區域' : type === 'sky' ? '已選取天空。可以用畫筆加入、橡皮擦減去範圍' : type === 'subject' || type === 'background' ? '先用一般演算法選取，AI 正在分析…' : '拖曳圓點調整範圍，再調整下方滑桿');
 }
 function dupMask() {
   const im = CUR(), m = activeMask(); if (!m) return; const ms = im.params.masks; if (ms.length >= 8) { toast('最多 8 個遮罩'); return; }
   const c = clone(m); c.id = newId();
-  if (c.type === 'brush') { const used = new Set(ms.filter(x => x.type === 'brush').map(x => x.ch)); const ch = [0, 1, 2, 3].find(k => !used.has(k)); if (ch === undefined) { toast('最多 4 個筆刷遮罩'); return; } c.ch = ch; }
+  if (isRaster(c.type)) { const used = new Set(ms.filter(x => isRaster(x.type)).map(x => x.ch)); const ch = [0, 1, 2, 3].find(k => !used.has(k)); if (ch === undefined) { toast('最多 4 個筆刷遮罩'); return; } c.ch = ch; }
   ms.splice(state.maskSel + 1, 0, c); state.maskSel++; refreshAll(); commit();
 }
 function delMask() { const im = CUR(); if (!activeMask()) return; im.params.masks.splice(state.maskSel, 1); state.maskSel = Math.min(state.maskSel, im.params.masks.length - 1); refreshAll(); commit(); }
@@ -3288,6 +3291,116 @@ function autoStraighten() {
   im.params.geo.angle = Math.round(-ang * 10) / 10 || 0; refreshAll(); fitView(); commit(); toast(`已自動拉直 ${im.params.geo.angle.toFixed(1)}°`);
 }
 
+// ---------- smart masks: sky, subject, background ----------
+// Raster masks like the brush (one channel of the brush texture each), refined with the same brush/eraser. Sky and the
+// fallback subject are LightCraft's heuristics (MIT); "subject" uses the U^2-Net-P model (Apache-2.0 weights, rembg ONNX export
+// MIT) through onnxruntime-web (MIT) when it can be downloaded, running entirely on this device.
+const isRaster = t => t === 'brush' || t === 'sky' || t === 'subject' || t === 'background';
+const smoothJ = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const AI = { ort: null, sess: null, loading: null, cache: new Map() };
+// oriented-frame coordinates (0..1, ignoring crop and straighten) for every texel of the W x H brush texture
+function orientedGrid(im, W, H, geo) {
+  const g0 = Object.assign({}, geo || im.params.geo, { angle: 0, tr: null, upright: null }), G0 = geometry(g0, im.fullW, im.fullH, true);
+  const nx = new Float32Array(W * H), ny = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const o = invMap(G0.m, (x + 0.5) / W * im.fullW, (y + 0.5) / H * im.fullH); nx[y * W + x] = o[0] / G0.outW; ny[y * W + x] = o[1] / G0.outH; }
+  return { nx, ny, G0 };
+}
+function logLumGrid(pd, W, H, ev) { const gain = Math.pow(2, ev || 0), n = W * H, logL = new Float32Array(n), blue = new Float32Array(n);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const px = Math.min(pd.w - 1, Math.floor((x + 0.5) / W * pd.w)), py = Math.min(pd.h - 1, Math.floor((y + 0.5) / H * pd.h)), o = (py * pd.w + px) * 3;
+    const R = pd.data[o] / 65535 * gain, G = pd.data[o + 1] / 65535 * gain, B = pd.data[o + 2] / 65535 * gain, Y = 0.2126 * R + 0.7152 * G + 0.0722 * B, i = y * W + x;
+    logL[i] = Math.log2(Math.max(Y, 1e-7) / 0.18); blue[i] = Math.max(B - R, 0) / (B + 1e-4);
+  }
+  return { logL, blue };
+}
+// two-image guided filter (Gaussian windows): snaps a soft mask to the edges of the guide I
+function guidedCross(I, p, W, H, sigma, eps) {
+  const n = W * H, mI = new Float32Array(I), mp = new Float32Array(p), II = new Float32Array(n), Ip = new Float32Array(n);
+  for (let i = 0; i < n; i++) { II[i] = I[i] * I[i]; Ip[i] = I[i] * p[i]; }
+  for (const a of [mI, mp, II, Ip]) gauss3(a, W, H, sigma);
+  const A = new Float32Array(n), B = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const v = II[i] - mI[i] * mI[i]; A[i] = (Ip[i] - mI[i] * mp[i]) / (v + eps); B[i] = mp[i] - A[i] * mI[i]; }
+  gauss3(A, W, H, sigma); gauss3(B, W, H, sigma);
+  const q = new Float32Array(n); for (let i = 0; i < n; i++) q[i] = Math.min(1, Math.max(0, A[i] * I[i] + B[i])); return q;
+}
+// alpha (0..1, W x H) for a smart mask, or null while an AI result is still being decoded
+function smartAlpha(im, m, W, H, src) {
+  const pd = src || (state.previewData && state.previewData.imId === im.id ? state.previewData : null); if (!pd) return null;
+  const b = m.base || { kind: m.type }, S = Math.max(W, H), kind = b.kind;
+  const { logL, blue } = logLumGrid(pd, W, H, b.ev);
+  let a;
+  if (kind === 'sky') {
+    const { ny } = orientedGrid(im, W, H); a = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) { const top = 1 - smoothJ(0.25, 0.7, ny[i]); a[i] = top * smoothJ(-3.5, -1.0, logL[i]) * (0.4 + 0.6 * Math.max(smoothJ(0, 0.3, blue[i]), smoothJ(0, 1.5, logL[i]))); }
+    gauss3(a, W, H, Math.max(0.01 * S, 0.5));
+  } else if (b.ai) {
+    const map = AI.cache.get(b.ai.z); if (!map) { decodeAIMask(b.ai.z, b.ai.w, b.ai.h); return null; }
+    const { nx, ny } = orientedGrid(im, W, H, b.ai.geo); a = new Float32Array(W * H); const aw = b.ai.w, ah = b.ai.h;
+    for (let i = 0; i < W * H; i++) { // bilinear lookup of the model output in the oriented frame
+      const fx = Math.min(aw - 1.001, Math.max(0, nx[i] * aw - 0.5)), fy = Math.min(ah - 1.001, Math.max(0, ny[i] * ah - 0.5)), x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0, o = y0 * aw + x0;
+      a[i] = ((map[o] * (1 - tx) + map[o + 1] * tx) * (1 - ty) + (map[o + aw] * (1 - tx) + map[o + aw + 1] * tx) * ty) / 255;
+    }
+    const q = guidedCross(logL, a, W, H, Math.max(0.006 * S, 1), 0.02); for (let i = 0; i < a.length; i++) a[i] = 0.35 * a[i] + 0.65 * q[i];
+    if (kind === 'background') for (let i = 0; i < a.length; i++) a[i] = 1 - a[i];
+  } else { // heuristic subject: centre-weighted, favouring local contrast
+    const { nx, ny } = orientedGrid(im, W, H); const bl = new Float32Array(logL); gauss3(bl, W, H, Math.max(0.03 * S, 1)); a = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) { const d = Math.hypot((nx[i] - 0.5) / 0.35, (ny[i] - 0.55) / 0.4), con = Math.abs(logL[i] - bl[i]); a[i] = (1 - smoothJ(0.6, 1, d)) * (0.5 + 0.5 * smoothJ(0.05, 0.6, con)); }
+    gauss3(a, W, H, Math.max(0.015 * S, 0.5));
+    if (kind === 'background') for (let i = 0; i < a.length; i++) a[i] = 1 - a[i];
+  }
+  return a;
+}
+async function decodeAIMask(z, w, h) {
+  if (AI.cache.has(z) || AI['dec_' + z]) return; AI['dec_' + z] = 1;
+  try {
+    const bin = Uint8Array.from(atob(z), c => c.charCodeAt(0));
+    const raw = new Uint8Array(await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    AI.cache.set(z, raw); BR.sig = ['', '', '', '']; if (CUR()) { syncBrush(CUR()); requestRender(false); }
+  } catch (e) { console.error(e); }
+}
+// lazily load onnxruntime-web (wasm, single thread) and the U^2-Net-P model; the model file is cached for offline use
+async function loadSubjectModel(onProgress) {
+  if (AI.sess) return AI.sess; if (AI.loading) return AI.loading;
+  AI.loading = (async () => {
+    const BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    onProgress && onProgress('下載 AI 執行環境…');
+    const ort = AI.ort || (AI.ort = await import(BASE + 'esm/ort.wasm-core.min.js'));
+    ort.env.wasm.wasmPaths = BASE; ort.env.wasm.numThreads = 1; ort.env.wasm.proxy = false;
+    const URL_ = 'https://huggingface.co/BritishWerewolf/U-2-Netp/resolve/7112208dbac3a3642496c8d54e2f0f9bb3dc1dc8/onnx/model.onnx';
+    let buf = null; try { const c = await caches.open('raw-editor-models'); const hit = await c.match(URL_); if (hit) buf = await hit.arrayBuffer(); } catch { }
+    if (!buf) { onProgress && onProgress('下載主體模型（約 4.6 MB，只需一次）…'); const r = await fetch(URL_); if (!r.ok) throw new Error('模型下載失敗 ' + r.status); buf = await r.clone().arrayBuffer(); try { (await caches.open('raw-editor-models')).put(URL_, r); } catch { } }
+    AI.sess = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] }); return AI.sess;
+  })();
+  try { return await AI.loading; } catch (e) { AI.loading = null; throw e; }
+}
+async function runSubjectAI(im) {
+  const sess = await loadSubjectModel(msg => status(msg)); const ort = AI.ort; status('AI 分析主體…');
+  const g0 = Object.assign({}, im.params.geo, { angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, tr: null, upright: null }), G0 = geometry(g0, im.fullW, im.fullH, true);
+  const U = uniformsFromParams(im.params, im); U.showMask = -1; U.clipWarn = 0; const { px, w, h } = renderer.readSmall(U, G0, 640, 'ai');
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h; cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.buffer.slice(0)), w, h), 0, 0);
+  const c2 = document.createElement('canvas'); c2.width = 320; c2.height = 320; const g2 = c2.getContext('2d'); g2.drawImage(cv, 0, 0, 320, 320);
+  const d = g2.getImageData(0, 0, 320, 320).data; const inp = new Float32Array(3 * 320 * 320); let mx = 1;
+  for (let i = 0; i < 320 * 320; i++) mx = Math.max(mx, d[i * 4], d[i * 4 + 1], d[i * 4 + 2]);
+  const mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+  for (let c = 0; c < 3; c++) for (let i = 0; i < 320 * 320; i++) inp[c * 320 * 320 + i] = (d[i * 4 + c] / mx - mean[c]) / std[c];
+  await new Promise(r => setTimeout(r, 30)); // let the status message paint before the blocking run
+  const t0 = performance.now(); const out = await sess.run({ [sess.inputNames[0]]: new ort.Tensor('float32', inp, [1, 3, 320, 320]) });
+  const o = out[sess.outputNames[0]].data; let lo = Infinity, hi = -Infinity; for (const v of o) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const map = new Uint8Array(320 * 320); for (let i = 0; i < map.length; i++) map[i] = Math.round((o[i] - lo) / Math.max(hi - lo, 1e-6) * 255);
+  const z = new Uint8Array(await new Response(new Blob([map]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+  let s = ''; for (let i = 0; i < z.length; i += 32768) s += String.fromCharCode.apply(null, z.subarray(i, i + 32768));
+  const zz = btoa(s); AI.cache.set(zz, map); status('');
+  return { z: zz, w: 320, h: 320, ms: Math.round(performance.now() - t0), geo: { rot: im.params.geo.rot, flipH: im.params.geo.flipH, flipV: im.params.geo.flipV } };
+}
+async function upgradeSubjectMask(m) {
+  const im = CUR(); if (!im) return;
+  try {
+    const ai = await runSubjectAI(im); if (!im.params.masks.includes(m)) return;
+    m.base = Object.assign({}, m.base, { ai }); BR.sig = ['', '', '', '']; syncBrush(im); requestRender(false); commit();
+    toast(`AI 已選取主體（${ai.ms} ms）。可以用畫筆／橡皮擦修邊。`);
+  } catch (e) { console.error(e); status(''); toast('AI 模型無法使用（' + (e.message || e) + '），先用一般演算法選取。', 5000); }
+}
+
 // ---------- film emulation LUTs ----------
 // FILM_LUTS (filmluts.js): { size, list:[{id,name,d,...}], data: base64(zlib(all LUTs, size^3*3 bytes each, red fastest)) }
 const FILM_LIST = (typeof FILM_LUTS !== 'undefined' && FILM_LUTS.list) || [];
@@ -3612,7 +3725,7 @@ function drawLocalOverlay(ctx) {
     const ell = (k, dash) => { ctx.setLineDash(dash ? [6 * dpr, 6 * dpr] : []); ctx.beginPath(); for (let i = 0; i <= 96; i++) { const s = i / 96 * Math.PI * 2, du = Math.cos(s) * m.rx * k, dv = Math.sin(s) * m.ry * k; const q = isoToCanvas(m.cx + ux * du - uy * dv, m.cy + uy * du + ux * dv); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); } ctx.stroke(); };
     ell(1, false); const f = (m.feather ?? 50) / 100; if (f > 0.02) ell(1 - f, true); ctx.setLineDash([]);
     const hs = maskHandles(m); handle(hs[0], true, 6); for (const h of hs.slice(1)) handle(h, false, 7);
-  } else if (m.type === 'brush' && state.cursor) {
+  } else if (isRaster(m.type) && state.cursor) {
     const [ix, iy] = canvasToIso(state.cursor[0], state.cursor[1]); const r = brushRadiusIso(state.tool.size);
     const a = isoToCanvas(ix, iy), b = isoToCanvas(ix + r, iy); const rr = Math.hypot(b[0] - a[0], b[1] - a[1]);
     ctx.beginPath(); ctx.arc(a[0], a[1], rr, 0, Math.PI * 2); ctx.strokeStyle = state.tool.erase ? 'rgba(255,120,120,.95)' : 'rgba(255,255,255,.95)'; ctx.stroke();
@@ -3624,7 +3737,7 @@ function drawLocalOverlay(ctx) {
 // ---------- brush masks (rasterised on 2D canvases, one texture channel per mask) ----------
 const BR = { imId: null, W: 0, H: 0, S: 0, cv: [], ctx: [], sig: ['', '', '', ''], buf: null, sprites: new Map(), dirtyAll: false };
 function brushRadiusIso(size) { return 0.004 + Math.pow(size / 100, 1.6) * 0.2; }
-function strokesSig(m) { let n = 0; for (const s of m.strokes) n += s.p.length; return m.id + ':' + m.strokes.length + ':' + n; }
+function strokesSig(m) { let n = 0; for (const s of m.strokes) n += s.p.length; const b = m.base; return m.id + ':' + m.strokes.length + ':' + n + (b ? ':' + b.kind + ':' + (b.ev || 0) + (b.ai ? ':ai' + b.ai.z.length : '') : ''); }
 function dabSprite(feather) {
   const k = Math.round(feather); let c = BR.sprites.get(k); if (c) return c;
   c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d');
@@ -3649,14 +3762,18 @@ function copyChannel(ch, x, y, w, h) {
   for (let j = 0; j < h; j++) { let s = j * w * 4 + 3, o = ((y + j) * W + x) * 4 + ch; for (let i = 0; i < w; i++, s += 4, o += 4) buf[o] = d[s]; }
   return [x, y, w, h];
 }
-function rasterMask(ch, m) {
+function rasterMask(ch, m, im, src) {
   const ctx = BR.ctx[ch]; ctx.clearRect(0, 0, BR.W, BR.H);
+  if (m && m.type !== 'brush' && im) { // smart mask base alpha, then the user's add/erase strokes on top
+    const a = smartAlpha(im, m, BR.W, BR.H, src);
+    if (a) { const img = new ImageData(BR.W, BR.H); for (let i = 0; i < a.length; i++) { const o = i * 4; img.data[o] = img.data[o + 1] = img.data[o + 2] = 255; img.data[o + 3] = Math.round(a[i] * 255); } ctx.putImageData(img, 0, 0); }
+  }
   if (m) for (const st of m.strokes) { const p = st.p; if (p.length < 2) continue; paintSegment(ctx, st, p[0], p[1], p[0], p[1], true); for (let i = 2; i + 1 < p.length; i += 2) paintSegment(ctx, st, p[i - 2], p[i - 1], p[i], p[i + 1], false); }
   copyChannel(ch, 0, 0, BR.W, BR.H);
 }
 // make the GPU brush texture match im's brush masks (cheap when nothing changed)
-function syncBrush(im) {
-  if (!im || !im.fullW) return; const ms = (im.params.masks || []).filter(m => m.type === 'brush'); if (!ms.length) return;
+function syncBrush(im, src) {
+  if (!im || !im.fullW) return; const ms = (im.params.masks || []).filter(m => isRaster(m.type)); if (!ms.length) return;
   const S = LOW_MEM ? 1024 : 1536, Lm = Math.max(im.fullW, im.fullH);
   const W = Math.max(8, Math.round(S * im.fullW / Lm)), H = Math.max(8, Math.round(S * im.fullH / Lm));
   if (BR.imId !== im.id || BR.W !== W || BR.H !== H) {
@@ -3665,7 +3782,7 @@ function syncBrush(im) {
     renderer.setBrushSize(W, H); BR.dirtyAll = true;
   }
   let dirty = BR.dirtyAll; BR.dirtyAll = false;
-  for (let c = 0; c < 4; c++) { const m = ms.find(x => x.ch === c); const sig = m ? strokesSig(m) : ''; if (sig !== BR.sig[c]) { rasterMask(c, m); BR.sig[c] = sig; dirty = true; } }
+  for (let c = 0; c < 4; c++) { const m = ms.find(x => x.ch === c); const sig = m ? strokesSig(m) : ''; if (sig !== BR.sig[c]) { rasterMask(c, m, im, src); BR.sig[c] = sig; dirty = true; } }
   if (dirty) renderer.updateBrush(BR.buf, 0, 0, W, H);
 }
 const r5 = v => Math.round(v * 1e5) / 1e5;
@@ -3682,7 +3799,7 @@ function strokeMove(x, y) {
   p.push(r5(ix), r5(iy)); const bb = paintSegment(BR.ctx[m.ch], st, lx, ly, ix, iy, false); flushBrush(m, bb);
 }
 function flushBrush(m, bb) { const r = copyChannel(m.ch, ...bb); if (r) renderer.updateBrush(BR.buf, ...r); BR.sig[m.ch] = strokesSig(m); requestRender(true); }
-function cancelShortStroke() { const m = activeMask(); if (m && m.type === 'brush' && m.strokes.length && m.strokes[m.strokes.length - 1].p.length <= 8) { m.strokes.pop(); requestRender(true); } }
+function cancelShortStroke() { const m = activeMask(); if (m && isRaster(m.type) && m.strokes.length && m.strokes[m.strokes.length - 1].p.length <= 8) { m.strokes.pop(); requestRender(true); } }
 
 // ---------- view interaction (pan / zoom / crop / masks) ----------
 const ptrs = new Map(); let gesture = null;
@@ -3728,7 +3845,7 @@ view.addEventListener('pointerdown', e => {
   if (!CUR()) return; (() => { try { view.setPointerCapture(e.pointerId); } catch { } })(); const [x, y] = canvasPt(e); ptrs.set(e.pointerId, { x, y });
   if (ptrs.size === 1 && state.tab === 'local' && activeMask() && !spaceDown && e.button === 0 && CUR().fullW) {
     const m = activeMask();
-    if (m.type === 'brush') { gesture = { type: 'paint', lastTap: 0 }; state.cursor = [x, y]; strokeStart(x, y); return; }
+    if (isRaster(m.type)) { gesture = { type: 'paint', lastTap: 0 }; state.cursor = [x, y]; strokeStart(x, y); return; }
     const hit = maskHit(x, y); if (hit) { gesture = { type: 'mask', key: hit, m0: clone(m), start: canvasToIso(x, y), lastTap: 0 }; return; }
   }
   if (ptrs.size === 1) {
@@ -3745,7 +3862,7 @@ view.addEventListener('pointerdown', e => {
   }
 });
 view.addEventListener('pointermove', e => {
-  if (!ptrs.has(e.pointerId)) { if (e.pointerType === 'mouse' && state.tab === 'local' && activeMask() && activeMask().type === 'brush') { state.cursor = canvasPt(e); drawOverlay(); } return; }
+  if (!ptrs.has(e.pointerId)) { if (e.pointerType === 'mouse' && state.tab === 'local' && activeMask() && isRaster(activeMask().type)) { state.cursor = canvasPt(e); drawOverlay(); } return; }
   if (!gesture) return; const [x, y] = canvasPt(e); ptrs.set(e.pointerId, { x, y });
   if (gesture.type === 'paint' && ptrs.size === 1) { state.cursor = [x, y]; strokeMove(x, y); return; }
   if (gesture.type === 'mask' && ptrs.size === 1) { maskDrag(gesture, x, y); return; }
@@ -3915,7 +4032,7 @@ addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
   else if (e.key === 'ArrowRight' && !e.ctrlKey) selectImage(cur + 1); else if (e.key === 'ArrowLeft' && !e.ctrlKey) selectImage(cur - 1);
-  else if (e.key === ' ' && state.tab === 'local' && activeMask() && activeMask().type === 'brush') { e.preventDefault(); spaceDown = true; }
+  else if (e.key === ' ' && state.tab === 'local' && activeMask() && isRaster(activeMask().type)) { e.preventDefault(); spaceDown = true; }
   else if ((e.key === 'o' || e.key === 'O') && state.tab === 'local' && activeMask()) { state.showMask = !state.showMask; refreshLocalUI(); requestRender(false); }
   else if (e.key === '[' || e.key === ']') { if (state.tab === 'local') { setParam('T.size', clamp(state.tool.size + (e.key === ']' ? 5 : -5), 1, 100)); } }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.tab === 'local' && activeMask()) { e.preventDefault(); delMask(); }
@@ -3991,7 +4108,7 @@ async function exportImage(im, o, prog) {
   const tiff = o.format === 'tiff', png = o.format === 'png';
   const enc = png ? new PngEncoder(outW, outH) : tiff ? new TiffEncoder(outW, outH, exif) : new JpegEncoder(outW, outH, o.quality, exif);
   const U = uniformsFromParams(params, im, { export: true });
-  if (U.useBrush) syncBrush(im);
+  if (U.useBrush) syncBrush(im, im === CUR() ? null : src); // smart masks of other photos are computed from this export's source
   // make sure the LUT matches this image
   renderer.setCurveLUT(curveLUTFor(params));
   try {
@@ -4004,7 +4121,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
