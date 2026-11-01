@@ -2831,39 +2831,98 @@ function cellRGB(px, w, h, gw, gh) {
 const CAM_LUT_N = 33; // 33^3: finer than film LUTs so a face in shade and dark foliage do not share lattice cells
 // 3D LUT (N^3, sRGB-encoded in and out) taking our rendering's colours (A) to the camera JPEG's (B): each uniform, unclipped
 // cell pair votes for the 8 lattice nodes around its colour; a smoothness term fills the gaps and nodes far from any sample
-// decay back to "no change". This is the per-photo version of a camera profile's look table (Adobe) / colour LUT (darktable).
-function fitCamLUT(A, B, N = CAM_LUT_N, lam = 0.2, total = 20000) {
-  const M = N - 1, nodes = N * N * N, acc = new Float64Array(nodes * 3), ws = new Float64Array(nodes), n = A.sd.length;
-  const wt = new Float32Array(n); let tot = 0;
+// decay back to "no change". Pairs the first solution cannot explain (cells that still do not line up) are dropped and it
+// is solved again; offsets are capped. The per-photo version of a camera profile's look table (Adobe) / colour LUT (darktable).
+function fitCamLUT(A, B, N = CAM_LUT_N, lam = 0.5, total = 20000) {
+  const M = N - 1, nodes = N * N * N, n = A.sd.length, wt = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     if (A.clip[i] > 0.2 || B.clip[i] > 0.2) continue;
-    const v = A.sd[i] * A.sd[i] + B.sd[i] * B.sd[i]; wt[i] = Math.exp(-v / (2 * 0.035 * 0.035)); tot += wt[i];
+    const v = A.sd[i] * A.sd[i] + B.sd[i] * B.sd[i]; wt[i] = Math.exp(-v / (2 * 0.035 * 0.035));
   }
-  const norm = tot > 0 ? total / tot : 0;
+  const corner = (i, f) => { const p = [0, 1, 2].map(j => Math.min(M - 1e-6, Math.max(0, A.rgb[i * 3 + j] * M))), q = p.map(v => v | 0); return f(q, p.map((v, j) => v - q[j])); };
+  const solve = () => {
+    const acc = new Float64Array(nodes * 3), ws = new Float64Array(nodes); let tot = 0;
+    for (let i = 0; i < n; i++) tot += wt[i];
+    const norm = tot > 0 ? total / tot : 0;
+    for (let i = 0; i < n; i++) {
+      const w0 = wt[i] * norm; if (!(w0 > 1e-4)) continue;
+      const d = [0, 1, 2].map(j => B.rgb[i * 3 + j] - A.rgb[i * 3 + j]);
+      corner(i, (q, f) => { for (let c = 0; c < 8; c++) {
+        const dr = c & 1, dg = (c >> 1) & 1, db = c >> 2, w = w0 * (dr ? f[0] : 1 - f[0]) * (dg ? f[1] : 1 - f[1]) * (db ? f[2] : 1 - f[2]);
+        const k = ((q[2] + db) * N + (q[1] + dg)) * N + (q[0] + dr); acc[k * 3] += w * d[0]; acc[k * 3 + 1] += w * d[1]; acc[k * 3 + 2] += w * d[2]; ws[k] += w;
+      } });
+    }
+    let off = new Float64Array(nodes * 3), nx = new Float64Array(nodes * 3); const mu = 0.05;
+    for (let it = 0; it < 100; it++) {
+      for (let b = 0; b < N; b++) for (let g = 0; g < N; g++) for (let r = 0; r < N; r++) {
+        const k = (b * N + g) * N + r; let s0 = 0, s1 = 0, s2 = 0, c = 0;
+        const nb = j => { s0 += off[j * 3]; s1 += off[j * 3 + 1]; s2 += off[j * 3 + 2]; c++; };
+        if (r > 0) nb(k - 1); if (r < M) nb(k + 1); if (g > 0) nb(k - N); if (g < M) nb(k + N); if (b > 0) nb(k - N * N); if (b < M) nb(k + N * N);
+        const den = ws[k] + lam * c + mu;
+        for (let j = 0; j < 3; j++) nx[k * 3 + j] = Math.max(-0.2, Math.min(0.2, (acc[k * 3 + j] + lam * [s0, s1, s2][j]) / den));
+      }
+      [off, nx] = [nx, off];
+    }
+    return off;
+  };
+  let off = solve();
+  // residual of every used pair under the first LUT; drop the ones far off (median-based), then solve again
+  const res = new Float32Array(n), used = [];
   for (let i = 0; i < n; i++) {
-    const w0 = wt[i] * norm; if (!(w0 > 1e-4)) continue;
-    const a = [A.rgb[i * 3], A.rgb[i * 3 + 1], A.rgb[i * 3 + 2]], d = [B.rgb[i * 3] - a[0], B.rgb[i * 3 + 1] - a[1], B.rgb[i * 3 + 2] - a[2]];
-    const p = a.map(v => Math.min(M - 1e-6, Math.max(0, v * M))), q = p.map(v => v | 0), f = p.map((v, j) => v - q[j]);
-    for (let c = 0; c < 8; c++) {
-      const dr = c & 1, dg = (c >> 1) & 1, db = c >> 2, w = w0 * (dr ? f[0] : 1 - f[0]) * (dg ? f[1] : 1 - f[1]) * (db ? f[2] : 1 - f[2]);
-      const k = ((q[2] + db) * N + (q[1] + dg)) * N + (q[0] + dr); acc[k * 3] += w * d[0]; acc[k * 3 + 1] += w * d[1]; acc[k * 3 + 2] += w * d[2]; ws[k] += w;
-    }
+    if (!(wt[i] > 1e-3)) continue;
+    const o = corner(i, (q, f) => { const v = [0, 0, 0]; for (let c = 0; c < 8; c++) { const dr = c & 1, dg = (c >> 1) & 1, db = c >> 2, w = (dr ? f[0] : 1 - f[0]) * (dg ? f[1] : 1 - f[1]) * (db ? f[2] : 1 - f[2]), k = ((q[2] + db) * N + (q[1] + dg)) * N + (q[0] + dr); for (let j = 0; j < 3; j++) v[j] += w * off[k * 3 + j]; } return v; });
+    res[i] = Math.hypot(B.rgb[i * 3] - A.rgb[i * 3] - o[0], B.rgb[i * 3 + 1] - A.rgb[i * 3 + 1] - o[1], B.rgb[i * 3 + 2] - A.rgb[i * 3 + 2] - o[2]); used.push(res[i]);
   }
-  let off = new Float64Array(nodes * 3), nx = new Float64Array(nodes * 3); const mu = 0.05;
-  for (let it = 0; it < 100; it++) {
-    for (let b = 0; b < N; b++) for (let g = 0; g < N; g++) for (let r = 0; r < N; r++) {
-      const k = (b * N + g) * N + r; let s0 = 0, s1 = 0, s2 = 0, c = 0;
-      const nb = j => { s0 += off[j * 3]; s1 += off[j * 3 + 1]; s2 += off[j * 3 + 2]; c++; };
-      if (r > 0) nb(k - 1); if (r < M) nb(k + 1); if (g > 0) nb(k - N); if (g < M) nb(k + N); if (b > 0) nb(k - N * N); if (b < M) nb(k + N * N);
-      const den = ws[k] + lam * c + mu; nx[k * 3] = (acc[k * 3] + lam * s0) / den; nx[k * 3 + 1] = (acc[k * 3 + 1] + lam * s1) / den; nx[k * 3 + 2] = (acc[k * 3 + 2] + lam * s2) / den;
-    }
-    [off, nx] = [nx, off];
+  if (used.length > 50) {
+    used.sort((a, b) => a - b); const thr = Math.max(0.03, 2.5 * used[used.length >> 1]);
+    for (let i = 0; i < n; i++) if (res[i] > thr) wt[i] = 0;
+    off = solve();
   }
   const out = new Float32Array(nodes * 3);
   for (let b = 0; b < N; b++) for (let g = 0; g < N; g++) for (let r = 0; r < N; r++) {
     const k = (b * N + g) * N + r; out[k * 3] = Math.min(1, Math.max(0, r / M + off[k * 3])); out[k * 3 + 1] = Math.min(1, Math.max(0, g / M + off[k * 3 + 1])); out[k * 3 + 2] = Math.min(1, Math.max(0, b / M + off[k * 3 + 2]));
   }
   return out;
+}
+// Line the embedded JPEG up with our rendering. In-camera distortion correction crops and stretches the JPEG a little
+// (about 4 % on a Nikon zoom), so without this the colour cells pair a white skirt with the grass beside it and the camera
+// colour LUT learns "white -> green" (blotches, green lines along arms). Searches a scale about the centre, a radial term
+// and a shift by correlating edge maps, then resamples the JPEG into our geometry.
+function lumGrad(px, w, h) {
+  const L = new Float32Array(w * h), g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) L[i] = 0.2126 * px[i * 4] + 0.7152 * px[i * 4 + 1] + 0.0722 * px[i * 4 + 2];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; g[i] = Math.abs(L[i + 1] - L[i - 1]) + Math.abs(L[i + w] - L[i - w]); }
+  return g;
+}
+// src: RGBA covering the frame at sw x sh; returns RGBA at w x h with JPEG coordinate = centre + (p - centre)*s*(1 + k r^2) + shift
+function warpJpeg(src, sw, sh, w, h, t) {
+  const out = new Uint8ClampedArray(w * h * 4), hd2 = 0.25 * (w * w + h * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const px = x + 0.5 - w / 2, py = y + 0.5 - h / 2, f = t.s * (1 + t.k * (px * px + py * py) / hd2);
+    const u = Math.min(sw - 1.001, Math.max(0, ((px * f) / w + 0.5 + t.dx) * sw - 0.5)), v = Math.min(sh - 1.001, Math.max(0, ((py * f) / h + 0.5 + t.dy) * sh - 0.5));
+    const x0 = u | 0, y0 = v | 0, fx = u - x0, fy = v - y0, i00 = (y0 * sw + x0) * 4, i10 = i00 + 4, i01 = i00 + sw * 4, i11 = i01 + 4, o = (y * w + x) * 4;
+    for (let c = 0; c < 3; c++) out[o + c] = (src[i00 + c] * (1 - fx) + src[i10 + c] * fx) * (1 - fy) + (src[i01 + c] * (1 - fx) + src[i11 + c] * fx) * fy;
+    out[o + 3] = 255;
+  }
+  return out;
+}
+function alignJpeg(ourPx, w, h, src, sw, sh) {
+  const go = lumGrad(ourPx, w, h), m = Math.round(Math.min(w, h) * 0.04);
+  const score = t => {
+    const gj = lumGrad(warpJpeg(src, sw, sh, w, h, t), w, h); let sa = 0, sb = 0, n = 0;
+    for (let y = m; y < h - m; y++) for (let x = m; x < w - m; x++) { const i = y * w + x; sa += go[i]; sb += gj[i]; n++; }
+    const ma = sa / n, mb = sb / n; let c = 0, va = 0, vb = 0;
+    for (let y = m; y < h - m; y++) for (let x = m; x < w - m; x++) { const i = y * w + x, a = go[i] - ma, b = gj[i] - mb; c += a * b; va += a * a; vb += b * b; }
+    return c / Math.sqrt(va * vb || 1e-12);
+  };
+  let best = { s: 1, k: 0, dx: 0, dy: 0 }, bs = score(best); const t0 = bs;
+  const tryT = t => { const c = score(t); if (c > bs) { bs = c; best = t; } };
+  const b0 = best; for (let s = 0.93; s <= 1.0701; s += 0.01) tryT(Object.assign({}, b0, { s }));
+  const b1 = best; for (const k of [-0.05, -0.03, -0.015, 0.015, 0.03, 0.05]) tryT(Object.assign({}, b1, { k }));
+  const b2 = best; for (const dx of [-0.015, -0.0075, 0, 0.0075, 0.015]) for (const dy of [-0.015, -0.0075, 0, 0.0075, 0.015]) if (dx || dy) tryT(Object.assign({}, b2, { dx, dy }));
+  const b3 = best; for (const ds of [-0.005, 0.005]) tryT(Object.assign({}, b3, { s: b3.s + ds }));
+  const b4 = best; for (const dk of [-0.0075, 0.0075]) tryT(Object.assign({}, b4, { k: b4.k + dk }));
+  return { t: best, corr: bs, corr0: t0 };
 }
 // fit the camera look for im; src = a decoded source that is not on screen (batch export), otherwise the current preview is used.
 // isStale() lets the caller abandon the fit (user switched photos). Returns the fitted values or null.
@@ -2903,8 +2962,17 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
       const t = lookStats(g.getImageData(0, 0, ow, oh).data, ow, oh, gw, gh), corr = gridCorrL(plain.grid, t.grid);
       if (corr > best) { best = corr; target = t; bestRot = rot; }
     }
+    // geometric alignment (alignJpeg): the JPEG at 512 px in our orientation, warped to our framing
+    const jw = 512, jh = Math.max(8, Math.round(512 * G.outH / G.outW)), cJ = document.createElement('canvas'); cJ.width = jw; cJ.height = jh;
+    const gJ = cJ.getContext('2d', { willReadFrequently: true }); gJ.translate(jw / 2, jh / 2); gJ.rotate(bestRot * Math.PI / 180);
+    { const sw = bestRot % 180 ? jh : jw, sh = bestRot % 180 ? jw : jh; gJ.drawImage(bm, -sw / 2, -sh / 2, sw, sh); }
+    const jpx = gJ.getImageData(0, 0, jw, jh).data; let al = { t: { s: 1, k: 0, dx: 0, dy: 0 }, corr: 0, corr0: 0 };
+    if (best > 0.6) {
+      const UA = uniformsFromParams(with1(K1.map(() => 0)), imx, {}); UA.showMask = -1; UA.clipWarn = 0; const rA = renderer.readSmall(UA, G, 128, 'look');
+      al = alignJpeg(rA.px, rA.w, rA.h, jpx, jw, jh); target = lookStats(warpJpeg(jpx, jw, jh, ow, oh, al.t), ow, oh, gw, gh); best = Math.max(best, gridCorrL(plain.grid, target.grid));
+    }
     const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
-    const info = { corr: +best.toFixed(3), aligned, bands: [] }; fitCameraLook.last = info;
+    const info = { corr: +best.toFixed(3), aligned, align: { s: +al.t.s.toFixed(3), k: al.t.k, dx: al.t.dx, dy: al.t.dy, edge: +al.corr.toFixed(3), edge0: +al.corr0.toFixed(3) } }; fitCameraLook.last = info;
     if (aligned) K1 = [...LOOK_KEYS, ['lens.manVig', -30, 50, 8, 20]];
     let vals;
     if (opts.lookVals) vals = clone(opts.lookVals);
@@ -2927,11 +2995,9 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
     // so skin, foliage and a light blue dress each land where the camera put them; HSL stays free for the user.
     const pL = mergeLook(Object.assign({}, base), vals); pL.camColor = 0;
     const UL = uniformsFromParams(pL, imx, {}); UL.showMask = -1; UL.clipWarn = 0; const rL = renderer.readSmall(UL, G, 256, 'look');
-    const cL = document.createElement('canvas'); cL.width = rL.w; cL.height = rL.h; const gL = cL.getContext('2d', { willReadFrequently: true });
-    gL.translate(rL.w / 2, rL.h / 2); gL.rotate(bestRot * Math.PI / 180);
-    { const sw = bestRot % 180 ? rL.h : rL.w, sh = bestRot % 180 ? rL.w : rL.h; gL.drawImage(bm, -sw / 2, -sh / 2, sw, sh); }
+    const jL = warpJpeg(jpx, jw, jh, rL.w, rL.h, al.t);
     const cw = opts.lutCells || 128, ch = Math.max(4, Math.round(cw * rL.h / rL.w));
-    Object.defineProperty(vals, '_lut', { value: fitCamLUT(cellRGB(rL.px, rL.w, rL.h, cw, ch), cellRGB(gL.getImageData(0, 0, rL.w, rL.h).data, rL.w, rL.h, cw, ch), opts.lutN || CAM_LUT_N, opts.lutLam ?? 0.2, opts.lutTotal || 20000), enumerable: false, configurable: true });
+    Object.defineProperty(vals, '_lut', { value: fitCamLUT(cellRGB(rL.px, rL.w, rL.h, cw, ch), cellRGB(jL, rL.w, rL.h, cw, ch), opts.lutN || CAM_LUT_N, opts.lutLam ?? 0.5, opts.lutTotal || 20000), enumerable: false, configurable: true });
     vals.camColor = 100; info.ms = Math.round(performance.now() - t0);
     return vals;
   } finally {
@@ -5052,7 +5118,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
