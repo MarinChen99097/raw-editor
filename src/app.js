@@ -150,10 +150,13 @@ function lensFor(im, L) {
 const MASK_TYPES = { linear: 0, radial: 1, brush: 2 };
 function packMasks(U, masks) {
   const n = Math.min(8, masks.length); U.nMasks = n; if (!n) return;
-  const A = () => new Float32Array(32); U.mG1 = A(); U.mG2 = A(); U.mA = A(); U.mB = A(); U.mC = A(); U.mD = A();
+  const A = () => new Float32Array(32); U.mG1 = A(); U.mG2 = A(); U.mA = A(); U.mB = A(); U.mC = A(); U.mD = A(); U.mE = A(); U.mF = A();
   const d = MASK_DEFAULTS;
   for (let i = 0; i < n; i++) {
     const m = masks[i], a = Object.assign({}, d.adj, m.adj), o = i * 4, t = MASK_TYPES[m.type] ?? 0;
+    const k = (m.amount ?? 100) / 100; if (k !== 1) for (const key of Object.keys(a)) a[key] *= k; // mask amount scales every adjustment
+    const cr = m.colorRange; if (cr && cr.on) { U.mE.set([cr.a, cr.b, cr.L, 0.02 + (cr.amt ?? 40) / 100 * 0.25], o); U.anyCR = true; }
+    U.mF.set([a.hue / 100, a.noise / 100, 0, 0], o);
     if (t === 0) U.mG1.set([m.x0, m.y0, m.x1, m.y1], o); else if (t === 1) U.mG1.set([m.cx, m.cy, m.rx, m.ry], o);
     U.mG2.set([t === 1 ? (m.angle || 0) * Math.PI / 180 : t === 2 ? m.ch : 0, (m.feather ?? d.feather) / 100, m.invert ? 1 : 0, t], o);
     U.mA.set([a.exposure, a.contrast / 100, a.highlights / 100, a.shadows / 100], o);
@@ -161,7 +164,7 @@ function packMasks(U, masks) {
     U.mC.set([a.saturation / 100, a.clarity / 100, a.dehaze / 100, a.texture / 100], o);
     U.mD.set([a.sharpen / 100, (m.lumLo ?? 0) / 100, (m.lumHi ?? 100) / 100, m.hidden ? 0 : (m.opacity ?? 100) / 100], o);
     if (t === 2) U.useBrush = true;
-    if (a.sharpen || a.texture) U.maskDetail = true;
+    if (a.sharpen || a.texture || a.noise) U.maskDetail = true;
   }
 }
 
@@ -171,6 +174,8 @@ function uniformsFromParams(p, im, opts = {}) {
   const U = baseUniforms(p);
   if (im) { const L = lensFor(im, p.lens || DEFAULTS.lens); U.lensOn = L.on; U.lens = L.table; U.defringe = ((p.lens && p.lens.defringe) || 0) / 100; }
   packMasks(U, p.masks || []);
+  { const pcs = (p.pointColors || []).slice(0, 4); U.nPC = pcs.length; if (pcs.length) { U.pcA = new Float32Array(16); U.pcB = new Float32Array(16);
+    pcs.forEach((q, i) => { U.pcA.set([q.L, q.a, q.b, 0.03 + (q.range ?? 40) / 100 * 0.25], i * 4); U.pcB.set([(q.hue || 0) / 100, (q.sat || 0) / 100, (q.lum || 0) / 100, 0], i * 4); }); } }
   { const f = p.film; if (f && f.id && f.amount > 0) { U.lutId = f.id; U.lutAmt = f.amount / 100; if (filmLUTState !== 'ready') loadFilmLUTs(); } }
   U.showMask = (!opts.export && im && im === CUR() && state.tab === 'local' && state.showMask && state.maskSel >= 0 && state.maskSel < U.nMasks) ? state.maskSel : -1;
   U.clipWarn = !opts.export && im && im === CUR() && state.clipWarn ? 1 : 0;
@@ -235,6 +240,7 @@ const setPath = (o, path, v) => { const ks = path.split('.'); const last = ks.po
 function sliderTarget(path) {
   if (path.startsWith('M.')) return [activeMask(), path.slice(2), MASK_DEFAULTS];
   if (path.startsWith('T.')) return [state.tool, path.slice(2), TOOL_DEFAULTS];
+  if (path.startsWith('PC.')) { const [, i, k] = path.split('.'); return [CUR() ? (CUR().params.pointColors || [])[+i] : null, k, PC_DEFAULTS]; }
   return [CUR() ? CUR().params : null, path, defaultsFor(CUR())];
 }
 function makeSlider(path, label, min, max, step, format, grad) {
@@ -275,6 +281,7 @@ function setParam(path, v, doCommit) {
     if (path.startsWith('M.adj.') && state.showMask) { state.showMask = false; refreshLocalUI(); } // show the effect, not the red overlay, while adjusting
     requestRender(true); if (doCommit) commit(); else { clearTimeout(setParam.t); setParam.t = setTimeout(() => updateMaskChips(), 200); } return;
   }
+  if (path.startsWith('PC.')) { const [, i, k] = path.split('.'); const q = (im.params.pointColors || [])[+i]; if (!q) return; q[k] = v; const s = sliders.get(path); if (s) s.update(); requestRender(true); if (doCommit) commit(); return; }
   setPath(im.params, path, v);
   const s = sliders.get(path); if (s) s.update();
   if (path === '_presetAmount') { if (im.presetObj && im.presetId) applyPresetUI(im.presetObj, im.presetId, true); return; }
@@ -312,6 +319,8 @@ function buildPanels() {
       }
     }
     if (t.id === 'hsl') {
+      sec.append(hdr('點顏色', el('button', { id: 'pcPick', onclick: () => { const im = CUR(); if (!im) return; if ((im.params.pointColors || []).length >= 4) { toast('最多 4 個點顏色'); return; } state.pickPC = !state.pickPC; $('#pcPick').classList.toggle('on', state.pickPC); if (state.pickPC) toast('點一下照片上要調整的顏色', 3000); } }, '＋ 吸取顏色')));
+      sec.append(el('div', { id: 'pcList' }));
       sec.append(hdr('HSL / 顏色', el('button', { onclick: () => { for (const c of 'hsl') for (let i = 0; i < 8; i++) setPath(CUR().params, `hsl.${c}.${i}`, 0); refreshAll(); commit(); } }, '重設')));
       const bands = el('div', { class: 'hslbands' }); sec.append(bands);
       let band = 0; const mode = el('div', { class: 'seg' }); let modeSel = 'all';
@@ -390,7 +399,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷' };
@@ -425,9 +434,15 @@ function buildLocalPanel(sec) {
   ed.append(hdr('調整', el('button', { onclick: () => { const m = activeMask(); if (!m) return; m.adj = clone(MASK_DEFAULTS.adj); refreshAll(); commit(); } }, '重設')));
   const AS = [['exposure', '曝光', -4, 4, 0.01, fmt.ev], ['contrast', '對比'], ['highlights', '亮部'], ['shadows', '暗部'], ['whites', '白色'], ['blacks', '黑色'],
     ['temp', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3f78ff,#888,#ffb347)'], ['tint', '色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'],
-    ['saturation', '飽和度'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度']];
+    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos]];
   for (const [k, n, mn = -100, mx = 100, st = 1, f = fmt.int, g] of AS) ed.append(makeSlider('M.adj.' + k, n, mn, mx, st, f, g));
+  ed.append(makeSlider('M.amount', '整體強度', 0, 200, 1, v => Math.round(v) + '%'));
   ed.append(hdr('範圍'));
+  localUI.crRow = el('div', { class: 'crrow' },
+    el('div', { class: 'toolbar' }, el('button', { id: 'crPick', onclick: () => { state.pickCR = !state.pickCR; $('#crPick').classList.toggle('on', state.pickCR); if (state.pickCR) toast('點一下照片上要選取的顏色', 3000); } }, '顏色範圍：吸取'),
+      el('span', { class: 'crsw', id: 'crSwatch' }), el('button', { onclick: () => { const m = activeMask(); if (!m || !m.colorRange) return; m.colorRange.on = false; refreshLocalUI(); requestRender(false); commit(); } }, '清除顏色範圍')),
+    makeSlider('M.colorRange.amt', '顏色範圍寬度', 1, 100, 1, fmt.pos));
+  ed.append(localUI.crRow);
   ed.append(makeSlider('M.lumLo', '亮度範圍：下限', 0, 100, 1, fmt.pos, 'linear-gradient(90deg,#000,#fff)'), makeSlider('M.lumHi', '亮度範圍：上限', 0, 100, 1, fmt.pos, 'linear-gradient(90deg,#000,#fff)'), makeSlider('M.opacity', '遮罩強度', 0, 100, 1, fmt.pos));
 }
 function updateMaskChips() {
@@ -436,6 +451,7 @@ function updateMaskChips() {
   ms.forEach((m, i) => box.append(el('button', { class: (i === state.maskSel ? 'on' : '') + (m.hidden ? ' off' : ''), onclick: () => selectMask(i) }, `${MASK_ICON[m.type]} ${i + 1} ${MASK_NAMES[m.type]}${m.invert ? '（反轉）' : ''}`)));
 }
 function refreshLocalUI() {
+  if (localUI.crRow) { const m = activeMask(); const on = !!(m && m.colorRange && m.colorRange.on); localUI.crRow.querySelector('.sl').style.display = on ? '' : 'none'; const sw = $('#crSwatch'); if (sw) { sw.style.display = on ? '' : 'none'; if (on) sw.style.background = m.colorRange.css || '#888'; } }
   if (!localUI.ed) return; const im = CUR();
   if (im && state.maskSel >= im.params.masks.length) state.maskSel = im.params.masks.length - 1;
   const m = activeMask();
@@ -698,6 +714,56 @@ function openPasteDialog(all) {
       el('button', { class: all ? 'primary' : '', onclick: () => go(true) }, `貼到全部 ${images.length} 張`), el('button', { onclick: () => m.classList.remove('on') }, '取消')),
     el('div', { class: 'hint' }, '貼上不會清掉照片原本的復原紀錄。快速鍵 Ctrl+V 會用上次勾選的項目。')));
   m.classList.add('on');
+}
+
+// ---------- colour pickers: point colour and mask colour range ----------
+function linToOklab(r, g, b) {
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b), s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+const srgbToLin = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+// colour as displayed (after all adjustments): read back the rendered result around the tapped point
+function displayedColorAt(sx, sy) {
+  const R = renderer.result, G = currentGeometry(); if (!R) return null;
+  const f = screenToFrame(sx, sy); const x = Math.round(f[0] * R.w / G.outW), y = Math.round(f[1] * R.h / G.outH);
+  if (x < 2 || y < 2 || x > R.w - 3 || y > R.h - 3) return null;
+  const gl = renderer.gl, px = new Uint8Array(5 * 5 * 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb); gl.readPixels(x - 2, y - 2, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, px); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  let r = 0, g = 0, b = 0; for (let i = 0; i < 100; i += 4) { r += px[i]; g += px[i + 1]; b += px[i + 2]; }
+  return [r / 25, g / 25, b / 25];
+}
+function pickColorAt(e) {
+  const im = CUR(); if (!im) return; const [sx, sy] = canvasPt(e);
+  if (state.pickPC) {
+    const c = displayedColorAt(sx, sy); if (!c) { toast('請點在照片上'); return; }
+    const lab = linToOklab(srgbToLin(c[0]), srgbToLin(c[1]), srgbToLin(c[2]));
+    im.params.pointColors = (im.params.pointColors || []).concat([{ L: lab[0], a: lab[1], b: lab[2], css: `rgb(${c.map(Math.round).join(',')})`, hue: 0, sat: 0, lum: 0, range: 40 }]);
+    state.pickPC = false; const b = $('#pcPick'); if (b) b.classList.remove('on');
+    refreshAll(); commit(); toast('已加入點顏色，拉下面的滑桿調整');
+  } else if (state.pickCR) {
+    const m = activeMask(); if (!m) { state.pickCR = false; return; }
+    const iso = canvasToIso(sx, sy), Lm = Math.max(im.fullW, im.fullH); const s = previewSample(iso[0] * Lm, iso[1] * Lm, 3);
+    if (!s || !s.R) { toast('請點在照片上'); return; }
+    const U = baseUniforms(im.params), k = U.exposure / 65535; const lin = [s.R * k * U.wb[0], s.G * k * U.wb[1], s.B * k * U.wb[2]];
+    const lab = linToOklab(...lin); const d = displayedColorAt(sx, sy);
+    m.colorRange = Object.assign({ amt: 40 }, m.colorRange || {}, { on: true, L: lab[0], a: lab[1], b: lab[2], css: d ? `rgb(${d.map(Math.round).join(',')})` : '#888' });
+    state.pickCR = false; const b = $('#crPick'); if (b) b.classList.remove('on');
+    refreshLocalUI(); requestRender(false); commit(); toast('遮罩只會影響相近的顏色；用「顏色範圍寬度」調整');
+  }
+}
+function refreshPointColorUI() {
+  const box = $('#pcList'); if (!box) return; const im = CUR(); const list = im ? (im.params.pointColors || []) : [];
+  for (const k of [...sliders.keys()]) if (k.startsWith('PC.')) sliders.delete(k);
+  box.innerHTML = '';
+  if (!list.length) { box.append(el('div', { class: 'hint' }, '用「＋ 吸取顏色」點照片上的某個顏色（例如膚色、天空、衣服），再單獨調整它的色相、飽和度和明度。')); return; }
+  list.forEach((q, i) => {
+    const del = el('button', { onclick: () => { im.params.pointColors = list.filter((_, j) => j !== i); refreshAll(); commit(); } }, '刪除');
+    box.append(el('div', { class: 'pcitem' }, hdr('', del),
+      makeSlider(`PC.${i}.hue`, '色相', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'), makeSlider(`PC.${i}.sat`, '飽和度', -100, 100, 1, fmt.int),
+      makeSlider(`PC.${i}.lum`, '明度', -100, 100, 1, fmt.int), makeSlider(`PC.${i}.range`, '範圍', 1, 100, 1, fmt.pos)));
+    const h = box.lastChild.querySelector('.hdr span'); h.append(el('span', { class: 'pcsw', style: `background:${q.css || '#888'}` }), ' 點顏色 ' + (i + 1));
+  });
+  for (const k of sliders.keys()) if (k.startsWith('PC.')) sliders.get(k).update();
 }
 
 // ---------- film emulation LUTs ----------
@@ -1108,6 +1174,7 @@ function cropHit(sx, sy) {
   return { l: nx, r: px, t: ny, b: py, move: !nx && !px && !ny && !py && sx > x0 && sx < x1 && sy > y0 && sy < y1 };
 }
 view.style.touchAction = 'none';
+view.addEventListener('pointerdown', e => { if ((state.pickPC || state.pickCR) && CUR() && e.button === 0) { e.preventDefault(); e.stopImmediatePropagation(); pickColorAt(e); } }, true);
 view.addEventListener('pointerdown', e => { if (state.pickWB && CUR() && e.button === 0) { e.preventDefault(); e.stopImmediatePropagation(); pickWBAt(e); } }, true);
 view.addEventListener('pointerdown', e => {
   if (!CUR()) return; view.setPointerCapture(e.pointerId); const [x, y] = canvasPt(e); ptrs.set(e.pointerId, { x, y });
@@ -1387,7 +1454,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {

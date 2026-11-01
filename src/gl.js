@@ -178,10 +178,12 @@ class Renderer {
     gl.uniform3fv(u.u_gradeG, U.gradeG || [0, 0, 0]); gl.uniform1f(u.u_gradeBlend, U.gradeBlend ?? 0.5);
     gl.uniform2fv(u.u_vig2, U.vig2 || [0, 0]); gl.uniform1f(u.u_grainRough, U.grainRough ?? 0.5); gl.uniform1f(u.u_sharpMask, U.sharpMask || 0);
     gl.uniform1i(u.u_clipWarn, U.clipWarn ? 1 : 0);
+    gl.uniform1i(u.u_nPC, U.nPC || 0); if (U.nPC) { gl.uniform4fv(u.u_pcA, U.pcA); gl.uniform4fv(u.u_pcB, U.pcB); }
     // lens correction
     gl.uniform1i(u.u_lensOn, U.lensOn ? 1 : 0); if (U.lensOn) gl.uniform4fv(u.u_lens, U.lens); gl.uniform1f(u.u_defringe, U.defringe || 0);
     // local adjustments
     const n = U.nMasks || 0; gl.uniform1i(u.u_nMasks, n);
+    gl.uniform1i(u.u_anyCR, U.anyCR ? 1 : 0); if (n) { gl.uniform4fv(u.u_mE, U.mE); gl.uniform4fv(u.u_mF, U.mF); }
     if (n) { gl.uniform4fv(u.u_mG1, U.mG1); gl.uniform4fv(u.u_mG2, U.mG2); gl.uniform4fv(u.u_mA, U.mA); gl.uniform4fv(u.u_mB, U.mB); gl.uniform4fv(u.u_mC, U.mC); gl.uniform4fv(u.u_mD, U.mD); }
     gl.uniform1i(u.u_showMask, U.showMask ?? -1); gl.uniform1i(u.u_maskDetail, U.maskDetail ? 1 : 0); gl.uniform1i(u.u_outMode, 0);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, (U.useBrush && this.brush) ? this.brush.tex : this.emptyBrush); gl.uniform1i(u.u_brush, 3);

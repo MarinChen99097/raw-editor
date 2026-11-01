@@ -128,6 +128,12 @@ uniform vec4  u_mA[8];          // exposure(EV), contrast, highlights, shadows
 uniform vec4  u_mB[8];          // whites, blacks, temp, tint
 uniform vec4  u_mC[8];          // saturation, clarity, dehaze, texture
 uniform vec4  u_mD[8];          // sharpen, luminance range low, high, opacity
+uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius (radius <= 0: off)
+uniform vec4  u_mF[8];          // hue shift, noise reduction, -, -
+uniform int   u_anyCR;          // any mask uses a colour range
+uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
+uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
+uniform int   u_nPC;
 uniform int   u_showMask;       // index of mask to tint red, -1 = none
 uniform int   u_maskDetail;     // 1 if any mask changes sharpening/texture (needs the mask before the detail pass)
 uniform int   u_outMode;        // 0 = 8-bit (dithered), 1 = high byte of 16-bit, 2 = low byte of 16-bit
@@ -186,9 +192,9 @@ void main(){
   vec2 fullPx = (u_m*vec3(outPx,1.0)).xy;       // lens-corrected full-image coords (masks live here)
 
   // --- local adjustment masks: positional weights ---
-  float lSharp = 0.0, lTex = 0.0;
+  float lSharp = 0.0, lTex = 0.0, lNR = 0.0;
   if(u_maskDetail == 1){
-    for(int i=0;i<8;i++){ if(i >= u_nMasks) break; float w = maskPos(i, fullPx); lSharp += w*u_mD[i].x; lTex += w*u_mC[i].w; }
+    for(int i=0;i<8;i++){ if(i >= u_nMasks) break; float w = maskPos(i, fullPx); lSharp += w*u_mD[i].x; lTex += w*u_mC[i].w; lNR += w*u_mF[i].y; }
   }
 
   // --- lens correction: distortion + lateral CA (dest -> source mapping) ---
@@ -209,8 +215,9 @@ void main(){
   ivec2 ci = ivec2(floor(lp));
 
   // --- noise reduction (bilateral on linear RGB) ---
-  if(u_nr.x > 0.001){
-    float Lc = dot(c,LUMA); float sig = 0.02 + u_nr.x*0.25; vec3 acc=vec3(0.0); float ws=0.0;
+  float nrAmt = u_nr.x + lNR;
+  if(nrAmt > 0.001){
+    float Lc = dot(c,LUMA); float sig = 0.02 + min(nrAmt, 1.5)*0.25; vec3 acc=vec3(0.0); float ws=0.0;
     for(int j=-2;j<=2;j++) for(int i=-2;i<=2;i++){
       vec3 s = fetchSrc(ci+ivec2(i,j)); float Ls = dot(s,LUMA);
       float dl = (Ls-Lc)/(Lc+0.004); float w = exp(-(dl*dl)/(2.0*sig*sig)) * exp(-float(i*i+j*j)/6.0);
@@ -245,14 +252,16 @@ void main(){
 
   // --- local adjustments: luminance range + accumulate ---
   float Y0 = enc(dot(c*u_exposure*u_wb, LUMA));
-  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, wShow=0.0;
+  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, wShow=0.0;
+  vec3 lab0 = vec3(0.0); if(u_anyCR == 1) lab0 = lin2oklab(max(c*u_exposure*u_wb, 0.0));
   for(int i=0;i<8;i++){
     if(i >= u_nMasks) break;
     float w = maskPos(i, fullPx)*rangeW(i, Y0);
+    if(u_mE[i].w > 0.0){ vec3 dd = lab0 - vec3(u_mE[i].z, u_mE[i].x, u_mE[i].y); float dist = length(vec3(dd.x*0.55, dd.y, dd.z)); w *= 1.0 - smoothstep(u_mE[i].w*0.55, u_mE[i].w, dist); }
     if(i == u_showMask) wShow = w;
     lExp += w*u_mA[i].x; lCon += w*u_mA[i].y; lHi += w*u_mA[i].z; lSh += w*u_mA[i].w;
     lWh += w*u_mB[i].x; lBl += w*u_mB[i].y; lTemp += w*u_mB[i].z; lTint += w*u_mB[i].w;
-    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z;
+    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x;
   }
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
@@ -330,7 +339,13 @@ void main(){
   {
     float dh = 0.0, ds = 0.0, dl = 0.0;
     for(int i=0;i<8;i++){ float w = bandW(h,i); dh += w*u_hsl[i].x; ds += w*u_hsl[i].y; dl += w*u_hsl[i].z; }
-    h += dh*45.0;
+    h += dh*45.0 + lHue*30.0;
+    for(int i=0;i<4;i++){ // point colour: shift colours close to a picked one
+      if(i >= u_nPC) break; vec4 A = u_pcA[i]; vec3 B = u_pcB[i].xyz;
+      vec3 dd = vec3(Ln - A.x, C*cos(radians(h)) - A.y, C*sin(radians(h)) - A.z);
+      float wpc = 1.0 - smoothstep(A.w*0.5, A.w, length(vec3(dd.x*0.5, dd.y, dd.z)));
+      h += wpc*B.x*30.0; C *= max(0.0, 1.0 + wpc*B.y); Ln += wpc*B.z*0.15*Cs;
+    }
     C *= max(0.0, 1.0 + ds);
     Ln += dl*0.18*Cs;
   }

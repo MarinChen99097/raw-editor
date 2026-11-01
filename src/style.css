@@ -37,6 +37,9 @@ button:disabled { opacity: .4; cursor: default; }
 .pastelist { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin: 8px 0; }
 .pastelist label { display: flex; align-items: center; gap: 6px; font-size: 13.5px; padding: 4px 0; }
 .pastelist input { width: 18px; height: 18px; }
+.crsw, .pcsw { display: inline-block; width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--line); vertical-align: middle; }
+.pcitem { border: 1px solid var(--line); border-radius: 10px; padding: 4px 10px 2px; margin: 6px 0; background: var(--panel2); }
+.pcitem .hdr { margin: 2px 0; text-transform: none; }
 #zoomlbl { position: absolute; left: 8px; top: 8px; font-size: 11px; color: var(--dim); background: rgba(15,15,18,.7); padding: 2px 6px; border-radius: 4px; }
 #filmstrip { flex: 0 0 74px; display: flex; gap: 6px; padding: 6px; overflow-x: auto; overflow-y: hidden; background: #0c0c0e; border-top: 1px solid var(--line); touch-action: pan-x; }
 #filmstrip:empty, #filmstrip.hidden { display: none; }
