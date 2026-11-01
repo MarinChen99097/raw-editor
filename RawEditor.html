@@ -2579,6 +2579,51 @@ function smallSource(src, maxW) {
 }
 // fit the camera look for im; src = a decoded source that is not on screen (batch export), otherwise the current preview is used.
 // isStale() lets the caller abandon the fit (user switched photos). Returns the fitted values or null.
+// Levenberg–Marquardt on slider values. K: [path, min, max, finite-difference step, prior scale]; evalAt(th) -> residuals.
+// A prior pulls every slider toward 0 so the fit prefers small, natural values. The Jacobian (one render per slider) is
+// refreshed at most `jac` times; up to three steps reuse each one (the sliders are close to linear over a few steps).
+async function lmFit(K, evalAt, isStale, jac) {
+  const P = K.map(k => 0.5 / k[4]);
+  const cost = (r, th) => r.reduce((a, v) => a + v * v, 0) + th.reduce((a, v, i) => a + (P[i] * v) ** 2, 0);
+  let th = K.map(() => 0), r = evalAt(th), C = cost(r, th), lambda = 0.01, n = 0;
+  for (let it = 0; it < jac; it++) {
+    const J = r.map(() => new Float64Array(th.length));
+    for (let i = 0; i < th.length; i++) {
+      const h = K[i][3] * (th[i] + K[i][3] > K[i][2] ? -1 : 1), t2 = th.slice(); t2[i] += h;
+      const r2 = evalAt(t2); for (let k = 0; k < r.length; k++) J[k][i] = (r2[k] - r[k]) / h;
+      if (++n % 3 === 0) { await new Promise(res => setTimeout(res, 0)); if (isStale()) return null; }
+    }
+    const JtJ = th.map((_, a) => th.map((_, b) => { let s = 0; for (const row of J) s += row[a] * row[b]; return s + (a === b ? P[a] * P[a] : 0); }));
+    let gain = 0;
+    for (let step = 0; step < 3; step++) {
+      const g = th.map((_, a) => { let s = 0; for (let k = 0; k < r.length; k++) s += J[k][a] * r[k]; return s + P[a] * P[a] * th[a]; });
+      let ok = false;
+      for (let tries = 0; tries < 4; tries++) {
+        const M = JtJ.map((row, a) => row.map((v, b) => a === b ? v * (1 + lambda) + 1e-9 : v)), d = solveSym(M, g);
+        const th2 = th.map((v, i) => clamp(v - d[i], K[i][1], K[i][2])), r2 = evalAt(th2), C2 = cost(r2, th2); n++;
+        if (C2 < C) { gain += (C - C2) / C; th = th2; r = r2; C = C2; lambda = Math.max(1e-4, lambda / 3); ok = true; break; }
+        lambda *= 4;
+      }
+      if (!ok) break;
+      if (isStale()) return null;
+    }
+    if (gain < 0.01) break;
+  }
+  return th;
+}
+// HSL band weights, same as bandW() in the shader (OkLCh hue, raised cosine between neighbouring band centres)
+const HSL_HUES = [29, 60, 100, 142, 195, 264, 300, 340];
+function hslBandW(h, i) {
+  const c = HSL_HUES[i], dPrev = (c - HSL_HUES[(i + 7) % 8] + 360) % 360, dNext = (HSL_HUES[(i + 1) % 8] - c + 360) % 360;
+  const d = ((h - c + 540) % 360) - 180, t = Math.min(1, Math.abs(d) / (d < 0 ? dPrev : dNext)); return 0.5 + 0.5 * Math.cos(t * Math.PI);
+}
+const zeroHSL = () => ({ h: new Array(8).fill(0), s: new Array(8).fill(0), l: new Array(8).fill(0) });
+function clearCameraLook(p) { for (const [k] of LOOK_KEYS) p[k] = 0; p.hsl = zeroHSL(); }
+// fit the camera look for im; src = a decoded source that is not on screen (batch export), otherwise the current preview is used.
+// isStale() lets the caller abandon the fit (user switched photos). Returns the fitted values or null.
+// Stage 1: the global sliders (LOOK_KEYS). Stage 2, when the JPEG lines up with our rendering: the HSL sliders of the colour
+// bands present in the photo, matched cell by cell. Cameras render each hue their own way (greens, skies, reds...), which
+// global temperature / tint / saturation cannot reproduce (Adobe's look tables and darktable's colour LUT play this role).
 async function fitCameraLook(im, src, isStale = () => false) {
   let bm;
   try {
@@ -2593,54 +2638,53 @@ async function fitCameraLook(im, src, isStale = () => false) {
   const base = clone(im.params), G = geometry(base.geo, FW, FH);
   renderer.setCurveLUT(curveLUTFor(base));
   const ow = 192, oh = Math.max(8, Math.round(192 * G.outH / G.outW)), gw = LOOK_GW, gh = Math.max(4, Math.round(LOOK_GW * G.outH / G.outW));
-  const statsAt = th => { const p = Object.assign({}, base); LOOK_KEYS.forEach(([k], i) => p[k] = th[i]); const U = uniformsFromParams(p, imx, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, ow, 'look'); return lookStats(r.px, r.w, r.h, gw, gh); };
-  // the embedded JPEG may be stored unrotated (portrait shots) or with another crop: try the orientations that fit the output's
-  // aspect and keep the one whose lightness lines up best; colour is compared cell by cell only when it lines up well
-  const plain = statsAt(LOOK_KEYS.map(() => 0));
-  const swapAR = (bm.width > bm.height) !== (G.outW > G.outH), arJ = swapAR ? bm.height / bm.width : bm.width / bm.height;
-  let target = null, best = -2;
-  for (const rot of swapAR ? [90, 270] : [0, 180]) {
-    const c = document.createElement('canvas'); c.width = ow; c.height = oh; const g = c.getContext('2d', { willReadFrequently: true });
-    g.translate(ow / 2, oh / 2); g.rotate(rot * Math.PI / 180); const sw = rot % 180 ? oh : ow, sh = rot % 180 ? ow : oh; g.drawImage(bm, -sw / 2, -sh / 2, sw, sh);
-    const t = lookStats(g.getImageData(0, 0, ow, oh).data, ow, oh, gw, gh), corr = gridCorrL(plain.grid, t.grid);
-    if (corr > best) { best = corr; target = t; }
-  }
-  bm.close();
-  const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
-  fitCameraLook.last = { corr: +best.toFixed(3), aligned };
-  const evalAt = th => lookResidual(statsAt(th), target, aligned);
-  const prior = th => LOOK_KEYS.map(([, , , , s], i) => 0.5 * th[i] / s);
-  const cost = (r, th) => r.reduce((a, v) => a + v * v, 0) + prior(th).reduce((a, v) => a + v * v, 0);
-  const clampTh = th => th.map((v, i) => clamp(v, LOOK_KEYS[i][1], LOOK_KEYS[i][2]));
-  let th = LOOK_KEYS.map(() => 0), r = evalAt(th), C = cost(r, th), lambda = 0.01, n = 0;
+  const statsFor = p => { const U = uniformsFromParams(p, imx, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, ow, 'look'); return lookStats(r.px, r.w, r.h, gw, gh); };
+  const with1 = th => { const p = Object.assign({}, base); LOOK_KEYS.forEach(([k], i) => p[k] = th[i]); return p; };
   try {
-    for (let it = 0; it < 7; it++) {
-      // Jacobian by forward differences
-      const J = r.map(() => new Array(th.length).fill(0));
-      for (let i = 0; i < th.length; i++) {
-        const h = LOOK_KEYS[i][3] * (th[i] + LOOK_KEYS[i][3] > LOOK_KEYS[i][2] ? -1 : 1); const t2 = th.slice(); t2[i] += h;
-        const r2 = evalAt(t2); for (let k = 0; k < r.length; k++) J[k][i] = (r2[k] - r[k]) / h;
-        if (++n % 3 === 0) { await new Promise(res => setTimeout(res, 0)); if (isStale()) return null; }
-      }
-      const P = LOOK_KEYS.map(([, , , , s]) => 0.5 / s), pr = prior(th);
-      const JtJ = th.map((_, a) => th.map((_, b) => J.reduce((s, row) => s + row[a] * row[b], 0) + (a === b ? P[a] * P[a] : 0)));
-      const g = th.map((_, a) => J.reduce((s, row, k) => s + row[a] * r[k], 0) + P[a] * pr[a]);
-      let improved = false;
-      for (let tries = 0; tries < 4; tries++) {
-        const M = JtJ.map((row, a) => row.map((v, b) => a === b ? v * (1 + lambda) + 1e-9 : v));
-        const th2 = clampTh(th.map((v, i) => v - solveSym(M, g)[i])); const r2 = evalAt(th2), C2 = cost(r2, th2); n++;
-        if (C2 < C) { const gain = (C - C2) / C; th = th2; r = r2; C = C2; lambda = Math.max(1e-4, lambda / 3); improved = gain > 0.01; break; }
-        lambda *= 4;
-      }
-      if (!improved) break;
-      if (isStale()) return null;
+    // the embedded JPEG may be stored unrotated (portrait shots) or with another crop: try the orientations that fit the output's
+    // aspect and keep the one whose lightness lines up best; colour is compared cell by cell only when it lines up well
+    const plain = statsFor(with1(LOOK_KEYS.map(() => 0)));
+    const swapAR = (bm.width > bm.height) !== (G.outW > G.outH), arJ = swapAR ? bm.height / bm.width : bm.width / bm.height;
+    let target = null, best = -2;
+    for (const rot of swapAR ? [90, 270] : [0, 180]) {
+      const c = document.createElement('canvas'); c.width = ow; c.height = oh; const g = c.getContext('2d', { willReadFrequently: true });
+      g.translate(ow / 2, oh / 2); g.rotate(rot * Math.PI / 180); const sw = rot % 180 ? oh : ow, sh = rot % 180 ? ow : oh; g.drawImage(bm, -sw / 2, -sh / 2, sw, sh);
+      const t = lookStats(g.getImageData(0, 0, ow, oh).data, ow, oh, gw, gh), corr = gridCorrL(plain.grid, t.grid);
+      if (corr > best) { best = corr; target = t; }
     }
+    const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
+    const info = { corr: +best.toFixed(3), aligned, bands: [] }; fitCameraLook.last = info;
+    const th1 = await lmFit(LOOK_KEYS, th => lookResidual(statsFor(with1(th)), target, aligned), isStale, 7);
+    if (!th1) return null;
+    const vals = {}; LOOK_KEYS.forEach(([k], i) => vals[k] = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]));
+    vals.hsl = zeroHSL();
+    if (!aligned) return vals;
+    // stage 2: bands that cover at least 3 % of the photo (chroma-weighted, as the shader applies HSL)
+    const p1 = Object.assign({}, base, vals), s1 = statsFor(p1), cells = s1.grid.length / 4, act = new Array(8).fill(0);
+    for (let k = 0; k < s1.grid.length; k += 4) {
+      const a = s1.grid[k + 1], b = s1.grid[k + 2], C = Math.hypot(a, b); if (C < 0.005) continue;
+      const h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360, wC = Math.min(1, C / 0.06);
+      for (let i = 0; i < 8; i++) act[i] += hslBandW(h, i) * wC / cells;
+    }
+    const bands = act.map((v, i) => v >= 0.03 ? i : -1).filter(i => i >= 0); info.bands = bands;
+    if (!bands.length) return vals;
+    const hp = 20, K2 = []; for (const i of bands) K2.push([`h.${i}`, -50, 50, 8, hp], [`s.${i}`, -60, 60, 8, hp], [`l.${i}`, -50, 50, 8, hp]);
+    const with2 = th => { const p = Object.assign({}, p1, { hsl: zeroHSL() }); K2.forEach(([q], i) => { const [c, b] = q.split('.'); p.hsl[c][+b] = th[i]; }); return p; };
+    const wL = 100 / Math.sqrt(cells), wab = 250 / Math.sqrt(cells);
+    const res2 = o => {
+      const r = o.q.map((v, i) => (v - target.q[i]) * 100), g = o.grid, t = target.grid;
+      for (let k = 0; k < g.length; k += 4) r.push((g[k] - t[k]) * wL, (g[k + 1] - t[k + 1]) * wab, (g[k + 2] - t[k + 2]) * wab);
+      return r;
+    };
+    const th2 = await lmFit(K2, th => res2(statsFor(with2(th))), isStale, 2);
+    if (!th2) return null;
+    K2.forEach(([q], i) => { const [c, b] = q.split('.'); vals.hsl[c][+b] = Math.round(th2[i]); });
+    return vals;
   } finally {
+    bm.close();
     if (swap && state.previewData && CUR()) { const pd = state.previewData; renderer.setSource(pd.data, pd.w, pd.h, pd.scale, CUR().fullW, CUR().fullH); refreshSpotSource(CUR(), true); }
     if (CUR()) renderer.setCurveLUT(curveLUTFor(CUR().params));
   }
-  const vals = {}; LOOK_KEYS.forEach(([k, , , step], i) => vals[k] = k === 'exposure' ? Math.round(th[i] * 100) / 100 : Math.round(th[i]));
-  return vals;
 }
 // apply fitted values as the photo's starting point (not an edit: history starts here, the photo is not marked edited)
 function applyCameraLook(im, vals) {
@@ -2653,7 +2697,7 @@ async function cameraLookButton() {
   if (im.file._isImage) { toast('JPEG／HEIC 本來就是相機的顏色，不需要這一步'); return; }
   if (!im.thumbBlobUrl) { toast('這個 RAW 檔裡沒有相機 JPEG 預覽，無法比對'); return; }
   status('比對相機 JPEG 的色調…');
-  const keep = clone(im.params); for (const [k] of LOOK_KEYS) im.params[k] = 0;
+  const keep = clone(im.params); clearCameraLook(im.params);
   const vals = await fitCameraLook(im, null); status('');
   if (!vals) { im.params = keep; toast('無法比對相機 JPEG', 3000, { kind: 'err' }); return; }
   Object.assign(im.params, vals); im.look = vals; im.presetId = null; refreshAll(); commit();
@@ -2661,7 +2705,7 @@ async function cameraLookButton() {
 }
 function camLookToast(im) {
   if (camLookToast.shown) return; camLookToast.shown = true;
-  toast('已從相機 JPEG 的色調開始；這些滑桿歸零就是原始 RAW', 6000, { kind: 'ok', action: { label: '改用原始', fn: () => { if (CUR() !== im) return; for (const [k] of LOOK_KEYS) im.params[k] = 0; im.presetId = null; refreshAll(); commit(); } } });
+  toast('已從相機 JPEG 的色調開始；這些滑桿歸零就是原始 RAW', 6000, { kind: 'ok', action: { label: '改用原始', fn: () => { if (CUR() !== im) return; clearCameraLook(im.params); im.presetId = null; refreshAll(); commit(); } } });
 }
 
 // ---------- uniforms ----------
@@ -4731,7 +4775,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
