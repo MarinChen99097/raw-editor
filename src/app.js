@@ -513,7 +513,20 @@ function refreshLensUI() {
 
 
 // ---------- crop panel ----------
-const ASPECTS = [['free', '自由'], ['orig', '原始'], ['1:1', '1:1'], ['3:2', '3:2'], ['4:3', '4:3'], ['16:9', '16:9'], ['4:5', '4:5'], ['5:7', '5:7']];
+const ASPECTS = [['free', '自由'], ['orig', '原始'], ['1:1', '1:1'], ['3:2', '3:2'], ['4:3', '4:3'], ['16:9', '16:9'], ['16:10', '16:10'], ['4:5', '4:5'], ['5:7', '5:7'], ['1.85:1', '1.85:1 電影'], ['2.39:1', '2.39:1 寬銀幕']];
+// crop guides (overlay only)
+const CROP_GUIDES = [['thirds', '三分法'], ['grid', '格線'], ['golden', '黃金比例'], ['diagonal', '對角線'], ['triangle', '三角形'], ['none', '無']];
+state.cropGuide = (() => { try { return localStorage.getItem('rawedit:guide') || 'thirds'; } catch { return 'thirds'; } })();
+function drawCropGuides(ctx, x0, y0, x1, y1, dpr) {
+  const w = x1 - x0, h = y1 - y0, k = state.cropGuide, L = (ax, ay, bx, by) => { ctx.moveTo(x0 + ax * w, y0 + ay * h); ctx.lineTo(x0 + bx * w, y0 + by * h); };
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1 * dpr; ctx.beginPath();
+  if (k === 'thirds') for (let i = 1; i < 3; i++) { L(i / 3, 0, i / 3, 1); L(0, i / 3, 1, i / 3); }
+  else if (k === 'grid') for (let i = 1; i < 8; i++) { L(i / 8, 0, i / 8, 1); L(0, i / 8, 1, i / 8); }
+  else if (k === 'golden') for (const t of [0.382, 0.618]) { L(t, 0, t, 1); L(0, t, 1, t); }
+  else if (k === 'diagonal') { L(0, 0, 1, 1); L(1, 0, 0, 1); const m = Math.min(w, h) / Math.max(w, h); if (w > h) { L(0, 0, m, 1); L(1, 0, 1 - m, 1); L(0, 1, m, 0); L(1, 1, 1 - m, 0); } else { L(0, 0, 1, m); L(0, 1, 1, 1 - m); } }
+  else if (k === 'triangle') { L(0, 1, 1, 0); const t = h * h / (w * w + h * h); L(0, 0, t, 1 - t); L(1, 1, 1 - t, t); }
+  ctx.stroke();
+}
 let cropUI = {};
 function buildCropPanel(sec) {
   sec.append(hdr('裁切與旋轉', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.geo = clone(DEFAULTS.geo); refreshAll(); fitView(); commit(); } }, '重設')));
@@ -528,6 +541,10 @@ function buildCropPanel(sec) {
   for (const [k, n] of ASPECTS) chips.append(el('button', { 'data-a': k, onclick: () => setAspect(k) }, n));
   chips.append(el('button', { onclick: () => { const g = CUR().params.geo; g.aspectSwap = !g.aspectSwap; setAspect(g.aspect); } }, '⟲ 直/橫'));
   sec.append(chips, el('div', { class: 'hint' }, '在畫面上拖曳邊框或角落調整裁切範圍，拖曳中間可移動。'));
+  sec.append(hdr('參考線')); const gch = el('div', { class: 'chips' });
+  const syncG = () => [...gch.children].forEach(b => b.classList.toggle('on', b.dataset.g === state.cropGuide));
+  for (const [k, n] of CROP_GUIDES) gch.append(el('button', { 'data-g': k, onclick: () => { state.cropGuide = k; try { localStorage.setItem('rawedit:guide', k); } catch { } syncG(); drawOverlay(); } }, n));
+  sec.append(gch); syncG();
   function rot(d) { const im = CUR(); if (!im) return; const g = im.params.geo; g.rot = (g.rot + d + 4) % 4; const c = g.crop; g.crop = d > 0 ? { x: 1 - c.y - c.h, y: c.x, w: c.h, h: c.w } : { x: c.y, y: 1 - c.x - c.w, w: c.h, h: c.w }; refreshAll(); fitView(); commit(); }
 }
 function aspectValue(g, Wr, Hr) {
@@ -1004,7 +1021,7 @@ function drawOverlay() {
   ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.rect(fx0, fy0, fx1 - fx0, fy1 - fy0); ctx.rect(x0, y0, x1 - x0, y1 - y0); ctx.fill('evenodd');
   const dpr = Math.min(devicePixelRatio || 1, 2);
   ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1 * dpr; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.beginPath(); for (let i = 1; i < 3; i++) { ctx.moveTo(x0 + (x1 - x0) * i / 3, y0); ctx.lineTo(x0 + (x1 - x0) * i / 3, y1); ctx.moveTo(x0, y0 + (y1 - y0) * i / 3); ctx.lineTo(x1, y0 + (y1 - y0) * i / 3); } ctx.stroke();
+  drawCropGuides(ctx, x0, y0, x1, y1, dpr);
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 3 * dpr; const L = 18 * dpr;
   for (const [cx, cy, dx, dy] of [[x0, y0, 1, 1], [x1, y0, -1, 1], [x0, y1, 1, -1], [x1, y1, -1, -1]]) { ctx.beginPath(); ctx.moveTo(cx, cy + dy * L); ctx.lineTo(cx, cy); ctx.lineTo(cx + dx * L, cy); ctx.stroke(); }
   for (const [ax, ay, bx, by] of [[(x0 + x1) / 2 - L / 2, y0, (x0 + x1) / 2 + L / 2, y0], [(x0 + x1) / 2 - L / 2, y1, (x0 + x1) / 2 + L / 2, y1], [x0, (y0 + y1) / 2 - L / 2, x0, (y0 + y1) / 2 + L / 2], [x1, (y0 + y1) / 2 - L / 2, x1, (y0 + y1) / 2 + L / 2]]) { ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); }
@@ -1379,7 +1396,7 @@ addEventListener('keydown', e => {
 // ---------- export ----------
 const modalExport = $('#modalExport');
 $('#btnExport').onclick = () => { if (!CUR()) return; if (LOW_MEM && !modalExport.dataset.init) { $('#expSize').value = '4000'; } modalExport.dataset.init = 1; $('#expMsg').textContent = ''; $('#expBar').style.width = '0'; $('#expGo').disabled = false; $('#expGo').textContent = '開始匯出'; $('#expScope').style.display = images.length > 1 ? '' : 'none'; $('#expScope').parentElement.style.display = images.length > 1 ? '' : 'none'; modalExport.classList.add('on'); };
-{ const f = $('#expFmt'); try { f.value = localStorage.getItem('rawedit:fmt') || 'jpeg'; } catch { } const sync = () => { $('#expQRow').style.display = f.value === 'tiff' ? 'none' : ''; try { localStorage.setItem('rawedit:fmt', f.value); } catch { } }; f.onchange = sync; sync(); }
+{ const f = $('#expFmt'); try { f.value = localStorage.getItem('rawedit:fmt') || 'jpeg'; } catch { } const sync = () => { $('#expQRow').style.display = f.value !== 'jpeg' ? 'none' : ''; try { localStorage.setItem('rawedit:fmt', f.value); } catch { } }; f.onchange = sync; sync(); }
 $('#expCancel').onclick =() => { if (state.busy) state.cancelExport = true; else modalExport.classList.remove('on'); };
 $('#expGo').onclick = async () => {
   if (state.busy) return; state.busy = true; state.cancelExport = false; $('#expGo').disabled = true; $('#expGo').textContent = '處理中…';
@@ -1393,7 +1410,7 @@ $('#expGo').onclick = async () => {
       const prog = (msg, f) => { $('#expMsg').textContent = (list.length > 1 ? `(${n + 1}/${list.length}) ` : '') + msg; $('#expBar').style.width = Math.round(f * 100) + '%'; };
       const blob = await exportImage(im, { sizeSel, quality, demosaic, wantExif, format }, prog);
       if (!blob) continue;
-      const outName = im.name.replace(/\.[^.]+$/, '') + (format === 'tiff' ? '_edit.tif' : '_edit.jpg');
+      const outName = im.name.replace(/\.[^.]+$/, '') + (format === 'tiff' ? '_edit.tif' : format === 'png' ? '_edit.png' : '_edit.jpg');
       // batch on a phone: keep JPEGs (up to ~400 MB) so they can be shared / saved to Photos in one go; otherwise save right away
       // and drop the blob so memory does not grow with every photo
       const keep = (list.length === 1 && navigator.canShare && IS_TOUCH) || (list.length > 1 && shareBatch && keptMB + blob.size / 1048576 < 400);
@@ -1438,18 +1455,18 @@ async function exportImage(im, o, prog) {
   const meta = im.meta || {}; const dt = meta.timestamp ? new Date(meta.timestamp * 1000) : new Date();
   const pad = n => String(n).padStart(2, '0'); const dts = `${dt.getFullYear()}:${pad(dt.getMonth() + 1)}:${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
   const exif = o.wantExif ? { make: meta.make, model: meta.model, software: 'RAW Editor (LibRaw)', dateTime: dts, exposure: meta.shutter, fnumber: meta.aperture, iso: meta.iso, focal: meta.focal, lens: meta.lens } : null;
-  const tiff = o.format === 'tiff';
-  const enc = tiff ? new TiffEncoder(outW, outH, exif) : new JpegEncoder(outW, outH, o.quality, exif);
+  const tiff = o.format === 'tiff', png = o.format === 'png';
+  const enc = png ? new PngEncoder(outW, outH) : tiff ? new TiffEncoder(outW, outH, exif) : new JpegEncoder(outW, outH, o.quality, exif);
   const U = uniformsFromParams(params, im, { export: true });
   if (U.useBrush) syncBrush(im);
   // make sure the LUT matches this image
   renderer.setCurveLUT(curveLUTFor(params));
   try {
-    await renderer.renderExport(U, { outW, outH, m }, src, (rows, n) => enc.addRows(rows, n), prog, () => state.cancelExport, tiff ? 16 : 8);
+    await renderer.renderExport(U, { outW, outH, m }, src, (rows, n) => enc.addRows(rows, n), prog, () => state.cancelExport, tiff || png ? 16 : 8);
   } finally { if (CUR()) { renderer.setCurveLUT(curveLUTFor(CUR().params)); syncBrush(CUR()); } } // restore LUT and brush texture for the current image
   if (state.cancelExport) return null;
-  prog(tiff ? '寫入 TIFF…' : '寫入 JPEG…', 0.98);
-  if (tiff) return enc.finish();
+  prog(tiff ? '寫入 TIFF…' : png ? '寫入 PNG…' : '寫入 JPEG…', 0.98);
+  if (tiff || png) return enc.finish();
   return new Blob([enc.finish()], { type: 'image/jpeg' });
 }
 
