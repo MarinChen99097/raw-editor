@@ -1093,7 +1093,9 @@ const DEFAULTS = ({
   // local adjustments: [{id, type:'linear'|'radial'|'brush', ...geometry, adj:{...}, invert, lumLo, lumHi, opacity}]
   masks: [],
   // point colour: [{L, a, b (picked, oklab), hue, sat, lum, range}] up to 4
-  pointColors: []
+  pointColors: [],
+  // spot removal / red eye (see heal module in app.js)
+  spots: []
 });
 // defaults for one local-adjustment mask (slider paths 'M.xxx' resolve against the active mask)
 const PC_DEFAULTS = { hue: 0, sat: 0, lum: 0, range: 40 };
@@ -1691,6 +1693,13 @@ class Renderer {
     this.buildBlur(this.src);
     return this.src;
   }
+  // Re-upload new pixel data into the current source texture (same size), e.g. after spot removal. Returns false if it does not fit.
+  updateSourceData(data, w, h) {
+    const gl = this.gl, s = this.src; if (!s || s.w !== w || s.h !== h) return false;
+    gl.bindTexture(gl.TEXTURE_2D, s.tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, data);
+    this._del(this.blur); this.blur = null; this.buildBlur(s); return true;
+  }
   // Build the blurred luminance texture (used for clarity) from a source texture.
   buildBlur(src) {
     const gl = this.gl;
@@ -2088,8 +2097,9 @@ function friendlyError(e) {
 // ---------- state ----------
 const images = []; let cur = -1;
 const state = { zoom: 1, panX: 0, panY: 0, compare: 0, split: 0.5, cropMode: false, tab: 'light', hq: false, hist: true, clipboard: null, previewData: null, busy: false,
-  maskSel: -1, showMask: false, tool: { size: 20, feather: 60, flow: 100, erase: false }, cursor: null };
-const TOOL_DEFAULTS = { size: 20, feather: 60, flow: 100 };
+  maskSel: -1, showMask: false, tool: { size: 20, feather: 60, flow: 100, erase: false, spotSize: 25, spotFeather: 50, dustSens: 30, healMode: 'heal' }, cursor: null };
+const TOOL_DEFAULTS = { size: 20, feather: 60, flow: 100, spotSize: 25, spotFeather: 50, dustSens: 30 };
+const SPOT_DEFAULTS = { size: 25, feather: 50, opacity: 100, pupil: 50, darken: 50 };
 // JPEG/HEIC/PNG were already sharpened and denoised in the camera, so they start without the RAW capture sharpening / colour NR.
 const IMG_DEFAULTS = Object.assign(clone(DEFAULTS), { sharpen: 0, nrColor: 0 });
 const defaultsFor = imOrFile => { const f = imOrFile && (imOrFile.file || imOrFile); return f && f._isImage ? IMG_DEFAULTS : DEFAULTS; };
@@ -2293,7 +2303,7 @@ const DEFAULT_U = uniformsFromParams(defaultParams());
 const fmt = { ev: v => (v > 0 ? '+' : '') + v.toFixed(2), int: v => (v > 0 ? '+' : '') + Math.round(v), pos: v => Math.round(v), dec: v => v.toFixed(1), deg: v => Math.round(v) + '°' };
 const TABS = [
   { id: 'light', name: '光線' }, { id: 'color', name: '顏色' }, { id: 'hsl', name: 'HSL' }, { id: 'curve', name: '曲線' }, { id: 'grade', name: '色調' },
-  { id: 'local', name: '局部' }, { id: 'fx', name: '效果' }, { id: 'detail', name: '細節' }, { id: 'lens', name: '鏡頭' }, { id: 'crop', name: '裁切' }, { id: 'presets', name: '預設' }, { id: 'info', name: '資訊' },
+  { id: 'local', name: '局部' }, { id: 'heal', name: '修復' }, { id: 'fx', name: '效果' }, { id: 'detail', name: '細節' }, { id: 'lens', name: '鏡頭' }, { id: 'crop', name: '裁切' }, { id: 'presets', name: '預設' }, { id: 'info', name: '資訊' },
 ];
 const SL = {
   light: [['exposure', '曝光', -5, 5, 0.01, fmt.ev], ['contrast', '對比', -100, 100, 1, fmt.int], ['highlights', '亮部', -100, 100, 1, fmt.int], ['shadows', '暗部', -100, 100, 1, fmt.int], ['whites', '白色', -100, 100, 1, fmt.int], ['blacks', '黑色', -100, 100, 1, fmt.int]],
@@ -2310,6 +2320,7 @@ function sliderTarget(path) {
   if (path.startsWith('M.')) return [activeMask(), path.slice(2), MASK_DEFAULTS];
   if (path.startsWith('T.')) return [state.tool, path.slice(2), TOOL_DEFAULTS];
   if (path.startsWith('PC.')) { const [, i, k] = path.split('.'); return [CUR() ? (CUR().params.pointColors || [])[+i] : null, k, PC_DEFAULTS]; }
+  if (path.startsWith('S.')) { const s = CUR() && (CUR().params.spots || [])[healUI.sel]; return [s ? Object.assign({ size: 25 }, s) : null, path.slice(2), SPOT_DEFAULTS]; }
   return [CUR() ? CUR().params : null, path, defaultsFor(CUR())];
 }
 function makeSlider(path, label, min, max, step, format, grad) {
@@ -2350,6 +2361,8 @@ function setParam(path, v, doCommit) {
     if (path.startsWith('M.adj.') && state.showMask) { state.showMask = false; refreshLocalUI(); } // show the effect, not the red overlay, while adjusting
     requestRender(true); if (doCommit) commit(); else { clearTimeout(setParam.t); setParam.t = setTimeout(() => updateMaskChips(), 200); } return;
   }
+  if (path.startsWith('S.')) { const s = (im.params.spots || [])[healUI.sel]; if (!s) return; const k = path.slice(2); s[k] = v; if (k === 'size') s.r = spotRadiusIso(v) * (s.mode === 'redeye' || s.mode === 'pet' ? 1.4 : 1);
+    const sl = sliders.get(path); if (sl) sl.update(); drawOverlay(); clearTimeout(healUI.st); healUI.st = setTimeout(() => refreshSpotSource(im), 120); if (doCommit) commit(); return; }
   if (path.startsWith('PC.')) { const [, i, k] = path.split('.'); const q = (im.params.pointColors || [])[+i]; if (!q) return; q[k] = v; const s = sliders.get(path); if (s) s.update(); requestRender(true); if (doCommit) commit(); return; }
   setPath(im.params, path, v);
   const s = sliders.get(path); if (s) s.update();
@@ -2442,6 +2455,7 @@ function buildPanels() {
       sec.append(makeSlider('grade.balance', '平衡（陰影 ↔ 亮部）', -100, 100, 1, fmt.int));
     }
     if (t.id === 'local') buildLocalPanel(sec);
+    if (t.id === 'heal') buildHealPanel(sec);
     if (t.id === 'lens') buildLensPanel(sec);
     if (t.id === 'crop') buildCropPanel(sec);
     if (t.id === 'presets') buildPresetPanel(sec);
@@ -2474,7 +2488,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷' };
@@ -2861,6 +2875,218 @@ function refreshPointColorUI() {
   for (const k of sliders.keys()) if (k.startsWith('PC.')) sliders.get(k).update();
 }
 
+// ---------- spot removal (heal / clone), red eye, dust detection ----------
+// Algorithms adapted from LightCraft (https://github.com/storytold/lightcraft), Copyright (c) 2026 ArtCraft Team and the
+// LightCraft contributors, MIT License. Spots are applied on the CPU to a copy of the decoded source (scene-linear, before
+// the shader), so the preview, histogram, thumbnails and the export all see them. Geometry is stored in "iso" units like masks.
+// spot: { mode: 'heal'|'clone'|'redeye'|'pet', x, y, r, ox, oy, feather, opacity }  (r, offsets: fraction of the long edge)
+const spotRadiusIso = s => 0.003 + Math.pow(s / 100, 1.5) * 0.08;
+const healUI = { sel: -1 };
+function healGeom(im) { // iso -> source px mapping helpers for the current source buffer
+  const Lm = Math.max(im.fullW, im.fullH); const L = lensFor(im, im.params.lens || DEFAULTS.lens);
+  const toSrcFull = (ix, iy) => L.on ? lensSourcePts(L.table, ix * Lm, iy * Lm, im.fullW, im.fullH)[0] : [ix * Lm, iy * Lm];
+  return { Lm, toSrcFull };
+}
+function bilinear3(d, w, h, x, y, out) {
+  x = Math.min(w - 1.001, Math.max(0, x - 0.5)); y = Math.min(h - 1.001, Math.max(0, y - 0.5));
+  const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0, i00 = (y0 * w + x0) * 3, i10 = i00 + 3, i01 = i00 + w * 3, i11 = i01 + 3;
+  for (let c = 0; c < 3; c++) out[c] = (d[i00 + c] * (1 - fx) + d[i10 + c] * fx) * (1 - fy) + (d[i01 + c] * (1 - fx) + d[i11 + c] * fx) * fy;
+  return out;
+}
+function boxBlurInPlace(a, w, h, r) { // separable box blur with clamped edges (3 passes ~ Gaussian)
+  if (r < 1) return; const t = new Float32Array(Math.max(w, h));
+  for (let y = 0; y < h; y++) { let s = 0; const o = y * w; for (let k = -r; k <= r; k++) s += a[o + Math.min(w - 1, Math.max(0, k))];
+    for (let x = 0; x < w; x++) { t[x] = s / (2 * r + 1); s += a[o + Math.min(w - 1, x + r + 1)] - a[o + Math.max(0, x - r)]; } for (let x = 0; x < w; x++) a[o + x] = t[x]; }
+  for (let x = 0; x < w; x++) { let s = 0; for (let k = -r; k <= r; k++) s += a[Math.min(h - 1, Math.max(0, k)) * w + x];
+    for (let y = 0; y < h; y++) { t[y] = s / (2 * r + 1); s += a[Math.min(h - 1, y + r + 1) * w + x] - a[Math.max(0, y - r) * w + x]; } for (let y = 0; y < h; y++) a[y * w + x] = t[y]; }
+}
+const gauss3 = (a, w, h, sigma) => { const r = Math.max(1, Math.round(Math.sqrt(12 * sigma * sigma / 3 + 1) / 2)); for (let i = 0; i < 3; i++) boxBlurInPlace(a, w, h, r); };
+// Heal / clone one circular spot in place. cx, cy, r, ox, oy in source px.
+function healSpot(d, w, h, cx, cy, r, ox, oy, feather, opacity, heal) {
+  const pad = r, x0 = Math.max(0, Math.floor(cx - r - pad)), y0 = Math.max(0, Math.floor(cy - r - pad)), x1 = Math.min(w, Math.ceil(cx + r + pad)), y1 = Math.min(h, Math.ceil(cy + r + pad));
+  const bw = x1 - x0, bh = y1 - y0; if (bw < 2 || bh < 2) return;
+  const n = bw * bh, alpha = new Float32Array(n), src = new Float32Array(n * 3), inner = r * (1 - feather / 100 * 0.8), tmp = [0, 0, 0];
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    const px = x0 + x + 0.5, py = y0 + y + 0.5, dd = Math.hypot(px - cx, py - cy), i = y * bw + x;
+    const t = Math.min(1, Math.max(0, (dd - inner) / Math.max(r - inner, 1e-6))); alpha[i] = (1 - t * t * (3 - 2 * t)) * opacity / 100;
+    bilinear3(d, w, h, px + ox, py + oy, tmp); src[i * 3] = tmp[0]; src[i * 3 + 1] = tmp[1]; src[i * 3 + 2] = tmp[2];
+  }
+  let low = null;
+  if (heal) { // tone from the surroundings only: normalised convolution of (target - source) outside the spot
+    const out = new Float32Array(n); for (let i = 0; i < n; i++) out[i] = alpha[i] < 0.02 ? 1 : 0;
+    const g = new Float32Array(out); const sig = Math.max(0.6 * r, 1); gauss3(g, bw, bh, sig); low = [];
+    for (let c = 0; c < 3; c++) {
+      const diff = new Float32Array(n); for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) { const i = y * bw + x; diff[i] = (d[((y0 + y) * w + x0 + x) * 3 + c] - src[i * 3 + c]) * out[i]; }
+      gauss3(diff, bw, bh, sig); for (let i = 0; i < n; i++) diff[i] /= Math.max(g[i], 1e-4); low.push(diff);
+    }
+  }
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    const i = y * bw + x, a = alpha[i]; if (a <= 0) continue; const o = ((y0 + y) * w + x0 + x) * 3;
+    for (let c = 0; c < 3; c++) { const tg = d[o + c], v = src[i * 3 + c] + (low ? low[c][i] : 0); d[o + c] = Math.max(0, Math.min(65535, Math.round(tg + (v - tg) * a))); }
+  }
+}
+// Automatic source: compare the ring around the spot with rings around 48 candidates (3 distances x 16 angles).
+function autoSpotSource(d, w, h, cx, cy, r) {
+  const ring = (x, y, r0, r1) => { const o = []; const t = [0, 0, 0];
+    for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2; for (const rr of [r0, (r0 + r1) / 2, r1]) { const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr; if (px < 0 || py < 0 || px >= w || py >= h) return null; bilinear3(d, w, h, px, py, t); o.push(t[0] / 65535, t[1] / 65535, t[2] / 65535); } }
+    return o; };
+  const A = ring(cx, cy, 1.05 * r, 1.6 * r); let best = null, bs = Infinity;
+  for (const k of [2.4, 3.2, 4.2]) for (let i = 0; i < 16; i++) {
+    const a = i / 16 * Math.PI * 2, ox = Math.cos(a) * k * r, oy = Math.sin(a) * k * r; if (!A) break;
+    const B = ring(cx + ox, cy + oy, 1.05 * r, 1.6 * r); if (!B) continue;
+    let S = 0; for (let j = 0; j < A.length; j++) { const q = Math.sqrt(Math.max(A[j], 0)) - Math.sqrt(Math.max(B[j], 0)); S += q * q; }
+    const I = ring(cx + ox, cy + oy, 0.2 * r, 0.9 * r);
+    if (I) { let mA = 0, cnt = 0; for (let j = 1; j < A.length; j += 3) { mA += Math.sqrt(A[j]); cnt++; } mA /= cnt; let v = 0, ci = 0; for (let j = 1; j < I.length; j += 3) { const q = Math.sqrt(I[j]) - mA; v += q * q; ci++; } S += v / ci * A.length * 0.5; }
+    if (S < bs) { bs = S; best = [ox, oy]; }
+  }
+  return best || [2.5 * r, 0];
+}
+// Red eye / pet eye inside an ellipse (cx, cy, rx, ry in source px): detect the pupil, then neutralise it.
+function fixEye(d, w, h, cx, cy, rx, ry, pet, darken, pupil) {
+  let tot = 0, sx = 0, sy = 0, ns = 0, ymax = 0, ysum = 0; const S = [];
+  for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+    const dx = (i + 0.5) / 40 * 2 - 1, dy = (j + 0.5) / 40 * 2 - 1; if (dx * dx + dy * dy > 1) continue;
+    const px = Math.round(cx + dx * rx), py = Math.round(cy + dy * ry); if (px < 0 || py < 0 || px >= w || py >= h) continue;
+    const o = (py * w + px) * 3, R = d[o] / 65535, G = d[o + 1] / 65535, B = d[o + 2] / 65535, Y = 0.2126 * R + 0.7152 * G + 0.0722 * B; ns++;
+    S.push([px, py, R, G, B, Y]); ymax = Math.max(ymax, Y); ysum += Y;
+  }
+  const sm = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  for (const [px, py, R, G, B, Y] of S) {
+    let wgt = 0;
+    if (pet) { if (ymax > 1e-6 && ymax >= 1.5 * ysum / Math.max(ns, 1)) wgt = sm(0.5, 0.8, Y / ymax); }
+    else wgt = R > 1e-3 ? sm(0.22, 0.42, (R - Math.max(G, B)) / (R + G + B + 1e-6)) : 0;
+    tot += wgt; sx += wgt * px; sy += wgt * py;
+  }
+  let pc = [cx, cy], pr = 0.5 * Math.min(rx, ry);
+  if (tot >= 3) { pc = [sx / tot, sy / tot]; pr = Math.sqrt(tot / ns * rx * ry); }
+  pr = Math.max(0.5, Math.min(pr * (0.5 + pupil / 100), Math.max(rx, ry) * 1.1));
+  const k = darken / 100, x0 = Math.max(0, Math.floor(pc[0] - pr * 1.4)), x1 = Math.min(w, Math.ceil(pc[0] + pr * 1.4)), y0 = Math.max(0, Math.floor(pc[1] - pr * 1.4)), y1 = Math.min(h, Math.ceil(pc[1] + pr * 1.4));
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const dd = Math.hypot(x + 0.5 - pc[0], y + 0.5 - pc[1]) / pr, o = (y * w + x) * 3; let R = d[o], G = d[o + 1], B = d[o + 2];
+    if (pet) { const m = 1 - sm(0.95, 1.2, dd); const Y = 0.2126 * R + 0.7152 * G + 0.0722 * B; const t = Math.min(Y, 0.04 * 65535) * (1 - 0.85 * k); R += (t - R) * m; G += (t - G) * m; B += (t - B) * m; }
+    else { const m = 1 - sm(1.0, 1.35, dd); const red = (R - Math.max(G, B)) / Math.max(R, 1); const a = m * sm(0.25, 0.5, red); const nv = 0.5 * (G + B) * (1 - 0.9 * k); R += (nv - R) * a; G += (nv - G) * a; B += (nv - B) * a; }
+    d[o] = Math.max(0, Math.round(R)); d[o + 1] = Math.max(0, Math.round(G)); d[o + 2] = Math.max(0, Math.round(B));
+  }
+}
+// Apply every spot, in order, to a source buffer (w x h, full px = source px * scale).
+function applySpotsToBuffer(d, w, h, scale, spots, im) {
+  const { Lm, toSrcFull } = healGeom(im);
+  for (const sp of spots) {
+    const c = toSrcFull(sp.x, sp.y), cx = c[0] / scale, cy = c[1] / scale, r = Math.max(1, sp.r * Lm / scale);
+    if (sp.mode === 'redeye' || sp.mode === 'pet') { fixEye(d, w, h, cx, cy, r, r * 0.8, sp.mode === 'pet', sp.darken ?? 50, sp.pupil ?? 50); continue; }
+    const s = toSrcFull(sp.x + sp.ox, sp.y + sp.oy);
+    healSpot(d, w, h, cx, cy, r, s[0] / scale - cx, s[1] / scale - cy, sp.feather ?? 50, sp.opacity ?? 100, sp.mode !== 'clone');
+  }
+}
+// Re-apply spots to the preview source when they changed (keeps the decoded original untouched in state.previewData).
+function refreshSpotSource(im, force) {
+  const pd = state.previewData; if (!im || !pd || pd.imId !== im.id) return;
+  const spots = im.params.spots || [], sig = JSON.stringify(spots);
+  if (!force && sig === healUI.sig && healUI.imId === im.id) return;
+  healUI.sig = sig; healUI.imId = im.id;
+  let data = pd.data; if (spots.length) { data = new Uint16Array(pd.data); applySpotsToBuffer(data, pd.w, pd.h, pd.scale, spots, im); }
+  if (!renderer.updateSourceData(data, pd.w, pd.h)) renderer.setSource(data, pd.w, pd.h, pd.scale, im.fullW, im.fullH);
+  requestRender(false);
+}
+function addSpotAt(ix, iy) {
+  const im = CUR(), pd = state.previewData; if (!im || !pd) return;
+  const mode = state.tool.healMode || 'heal'; const r = spotRadiusIso(state.tool.spotSize ?? 25);
+  const sp = { mode, x: ix, y: iy, r, ox: 0, oy: 0, feather: state.tool.spotFeather ?? 50, opacity: 100, size: state.tool.spotSize ?? 25 };
+  if (mode === 'redeye' || mode === 'pet') { sp.r = r * 1.4; sp.darken = 50; sp.pupil = 50; }
+  else { // pick the source once on the preview and store it, so preview and export agree
+    const { Lm, toSrcFull } = healGeom(im); const c = toSrcFull(ix, iy);
+    const o = autoSpotSource(pd.data, pd.w, pd.h, c[0] / pd.scale, c[1] / pd.scale, Math.max(1, r * Lm / pd.scale));
+    sp.ox = o[0] * pd.scale / Lm; sp.oy = o[1] * pd.scale / Lm;
+  }
+  im.params.spots = (im.params.spots || []).concat([sp]); healUI.sel = im.params.spots.length - 1;
+  refreshSpotSource(im); refreshHealUI(); commit(); drawOverlay();
+}
+// Dust detection on the rendered image (useful for film scans): small dark blobs on smooth surroundings become heal spots.
+function detectDust(sens = 50) {
+  const im = CUR(); if (!im || !renderer.src) return;
+  const HU = uniformsFromParams(im.params, im); HU.showMask = -1; HU.clipWarn = 0;
+  const G = geometry(im.params.geo, im.fullW, im.fullH, true); const { px, w, h } = renderer.readSmall(HU, G, 1600, 'dust');
+  const n = w * h, l = new Float32Array(n); for (let i = 0; i < n; i++) l[i] = (0.2126 * px[i * 4] + 0.7152 * px[i * 4 + 1] + 0.0722 * px[i * 4 + 2]) / 255;
+  const long = Math.max(w, h), around = new Float32Array(l); gauss3(around, w, h, Math.max(0.012 * long, 2));
+  const tex = new Float32Array(n); for (let i = 0; i < n; i++) tex[i] = Math.abs(l[i] - around[i]); gauss3(tex, w, h, Math.max(0.02 * long, 3));
+  const minDark = 0.03 - 0.022 * sens / 100, cand = new Uint8Array(n);
+  for (let i = 0; i < n; i++) { const dk = Math.max(around[i] - l[i], 0); cand[i] = dk > minDark && dk > 3 * tex[i] && l[i] > 0.08 ? 1 : 0; }
+  const seen = new Uint8Array(n), found = [], maxN = Math.pow(0.02 * long, 2) * 4;
+  for (let s = 0; s < n; s++) {
+    if (!cand[s] || seen[s]) continue; const st = [s]; seen[s] = 1; let cnt = 0, mx = 0, my = 0, x0 = w, x1 = 0, y0 = h, y1 = 0, peak = 0, big = false;
+    while (st.length) { const p = st.pop(), x = p % w, y = (p - x) / w; cnt++; mx += x; my += y; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); peak = Math.max(peak, around[p] - l[p]);
+      if (cnt > maxN) { big = true; } for (const q of [p - 1, p + 1, p - w, p + w]) { if (q < 0 || q >= n || seen[q] || !cand[q]) continue; if (Math.abs((q % w) - x) > 1) continue; seen[q] = 1; if (!big) st.push(q); } }
+    if (big) continue; const bw = x1 - x0 + 1, bh = y1 - y0 + 1, r = Math.max(bw, bh) / 2;
+    if (r < 0.0015 * long || r > 0.02 * long || Math.max(bw, bh) / Math.min(bw, bh) > 1.8 || cnt < 0.45 * bw * bh) continue;
+    // the surroundings must be smooth: a ring at 1.6r..3r around the blob may vary much less than the blob is dark (rejects twigs, texture)
+    { const cx0 = mx / cnt, cy0 = my / cnt; let m = 0, m2 = 0, k = 0;
+      for (let a = 0; a < 32; a++) for (const rr of [1.6 * r + 1, 2.3 * r + 1.5, 3 * r + 2]) { const x = Math.round(cx0 + Math.cos(a / 32 * 6.2832) * rr), y = Math.round(cy0 + Math.sin(a / 32 * 6.2832) * rr); if (x < 0 || y < 0 || x >= w || y >= h) continue; const v = l[y * w + x]; m += v; m2 += v * v; k++; }
+      if (k < 40) continue; m /= k; const sd = Math.sqrt(Math.max(0, m2 / k - m * m)); if (sd > peak * 0.2) continue;
+      // a line (twig, wire, edge) crossing the blob shows up as dark samples on the ring; real dust is an isolated speck
+      let hits = 0; for (let a = 0; a < 32; a++) for (const rr of [2.3 * r + 1.5, 3 * r + 2]) { const x = Math.round(cx0 + Math.cos(a / 32 * 6.2832) * rr), y = Math.round(cy0 + Math.sin(a / 32 * 6.2832) * rr); if (x >= 0 && y >= 0 && x < w && y < h && l[y * w + x] < m - 0.5 * peak) hits++; }
+      if (hits >= 2) continue; }
+    found.push({ fx: (mx / cnt + 0.5) / w, fy: (my / cnt + 0.5) / h, r: r / long * 1.6, s: peak });
+  }
+  found.sort((a, b) => b.s - a.s); const top = found.slice(0, 60);
+  if (!top.length) { toast('沒有找到明顯的灰塵'); return 0; }
+  const Lm = Math.max(im.fullW, im.fullH), pd = state.previewData, { toSrcFull } = healGeom(im); const add = [];
+  for (const f of top) { // detected on the uncropped output frame -> iso
+    const p = mapPt(G.m, f.fx * G.outW, f.fy * G.outH), ix = p[0] / Lm, iy = p[1] / Lm, r = f.r * Math.max(G.outW, G.outH) / Lm;
+    const c = toSrcFull(ix, iy), o = autoSpotSource(pd.data, pd.w, pd.h, c[0] / pd.scale, c[1] / pd.scale, Math.max(1, r * Lm / pd.scale));
+    add.push({ mode: 'heal', x: ix, y: iy, r, ox: o[0] * pd.scale / Lm, oy: o[1] * pd.scale / Lm, feather: 50, opacity: 100, dust: 1 });
+  }
+  im.params.spots = (im.params.spots || []).concat(add); refreshSpotSource(im); refreshHealUI(); commit(); drawOverlay();
+  toast(`找到並修掉 ${add.length} 個灰塵點，可以點選個別的點調整或刪除`); return add.length;
+}
+function healHit(sx, sy) {
+  const im = CUR(); if (!im) return null; const sp = im.params.spots || []; const R = 14 * dprNow();
+  for (let i = sp.length - 1; i >= 0; i--) {
+    const s = sp[i], c = isoToCanvas(s.x, s.y), e = isoToCanvas(s.x + s.r, s.y), rr = Math.max(R, Math.hypot(e[0] - c[0], e[1] - c[1]));
+    if (s.mode === 'heal' || s.mode === 'clone') { const q = isoToCanvas(s.x + s.ox, s.y + s.oy); if (Math.hypot(sx - q[0], sy - q[1]) < rr) return { i, part: 'src' }; }
+    if (Math.hypot(sx - c[0], sy - c[1]) < rr) return { i, part: 'dst' };
+  }
+  return null;
+}
+function drawHealOverlay(ctx) {
+  const im = CUR(); const sp = im.params.spots || []; const dpr = dprNow();
+  sp.forEach((s, i) => {
+    const c = isoToCanvas(s.x, s.y), e = isoToCanvas(s.x + s.r, s.y), rr = Math.hypot(e[0] - c[0], e[1] - c[1]); const on = i === healUI.sel;
+    ctx.lineWidth = (on ? 2 : 1.2) * dpr; ctx.strokeStyle = on ? '#fff' : 'rgba(255,255,255,0.7)';
+    ctx.beginPath(); ctx.arc(c[0], c[1], rr, 0, Math.PI * 2); ctx.stroke();
+    if (s.mode === 'heal' || s.mode === 'clone') {
+      const q = isoToCanvas(s.x + s.ox, s.y + s.oy); ctx.setLineDash([4 * dpr, 3 * dpr]); ctx.strokeStyle = on ? '#7fb6ff' : 'rgba(127,182,255,0.6)';
+      ctx.beginPath(); ctx.arc(q[0], q[1], rr, 0, Math.PI * 2); ctx.stroke();
+      const dx = q[0] - c[0], dy = q[1] - c[1], dl = Math.hypot(dx, dy) || 1; ctx.beginPath(); ctx.moveTo(c[0] + dx / dl * rr, c[1] + dy / dl * rr); ctx.lineTo(q[0] - dx / dl * rr, q[1] - dy / dl * rr); ctx.stroke(); ctx.setLineDash([]);
+    } else { ctx.strokeStyle = on ? '#ff6b6b' : 'rgba(255,107,107,0.7)'; ctx.beginPath(); ctx.arc(c[0], c[1], rr * 0.5, 0, Math.PI * 2); ctx.stroke(); }
+  });
+}
+const HEAL_MODES = [['heal', '修復'], ['clone', '仿製'], ['redeye', '紅眼'], ['pet', '寵物眼']];
+function buildHealPanel(sec) {
+  sec.append(hdr('污點修復', el('button', { onclick: () => { const im = CUR(); if (!im || !(im.params.spots || []).length) return; if (!confirm('清除這張照片的全部修復點？')) return; im.params.spots = []; healUI.sel = -1; refreshSpotSource(im); refreshHealUI(); commit(); drawOverlay(); } }, '全部清除')));
+  const seg = el('div', { class: 'seg' }); healUI.seg = seg;
+  for (const [k, n] of HEAL_MODES) seg.append(el('button', { 'data-m': k, onclick: () => { state.tool.healMode = k; refreshHealUI(); } }, n));
+  sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg));
+  sec.append(makeSlider('T.spotSize', '新增點的大小', 1, 100, 1, fmt.pos), makeSlider('T.spotFeather', '新增點的羽化', 0, 100, 1, fmt.pos));
+  sec.append(el('div', { class: 'hint' }, IS_TOUCH ? '點一下照片放修復點，來源會自動挑選；拖曳白圈移動位置，拖曳藍色虛線圈換來源。雙指可縮放。' : '點一下照片放修復點，來源會自動挑選；拖曳白圈移動位置，拖曳藍色虛線圈換來源。滾輪縮放。'));
+  healUI.edit = el('div', {}); sec.append(healUI.edit);
+  sec.append(hdr('灰塵（底片掃描）'), el('div', { class: 'toolbar' }, el('button', { onclick: () => detectDust(state.tool.dustSens ?? 30) }, '自動偵測灰塵')), makeSlider('T.dustSens', '偵測靈敏度', 0, 100, 1, fmt.pos));
+  refreshHealUI();
+}
+function refreshHealUI() {
+  if (!healUI.seg) return; const im = CUR(); const mode = state.tool.healMode || 'heal';
+  [...healUI.seg.children].forEach(b => b.classList.toggle('on', b.dataset.m === mode));
+  for (const k of [...sliders.keys()]) if (k.startsWith('S.')) sliders.delete(k);
+  healUI.edit.innerHTML = ''; const sp = im ? (im.params.spots || []) : [];
+  if (healUI.sel >= sp.length) healUI.sel = -1;
+  if (!sp.length) return; healUI.edit.append(el('div', { class: 'hint' }, `共 ${sp.length} 個修復點${healUI.sel >= 0 ? '，正在編輯第 ' + (healUI.sel + 1) + ' 個' : '，點一下圓圈可以編輯'}`));
+  if (healUI.sel < 0) return; const s = sp[healUI.sel];
+  healUI.edit.append(hdr('選取的點', el('button', { class: 'danger', onclick: () => { im.params.spots = sp.filter((_, j) => j !== healUI.sel); healUI.sel = -1; refreshSpotSource(im); refreshHealUI(); commit(); drawOverlay(); } }, '刪除')));
+  healUI.edit.append(makeSlider('S.size', '大小', 1, 100, 1, fmt.pos));
+  if (s.mode === 'heal' || s.mode === 'clone') healUI.edit.append(makeSlider('S.feather', '羽化', 0, 100, 1, fmt.pos), makeSlider('S.opacity', '不透明度', 0, 100, 1, fmt.pos));
+  else healUI.edit.append(makeSlider('S.pupil', '瞳孔大小', 0, 100, 1, fmt.pos), makeSlider('S.darken', '變暗', 0, 100, 1, fmt.pos));
+  for (const k of sliders.keys()) if (k.startsWith('S.')) sliders.get(k).update();
+}
+
 // ---------- film emulation LUTs ----------
 // FILM_LUTS (filmluts.js): { size, list:[{id,name,d,...}], data: base64(zlib(all LUTs, size^3*3 bytes each, red fastest)) }
 const FILM_LIST = (typeof FILM_LUTS !== 'undefined' && FILM_LUTS.list) || [];
@@ -3092,6 +3318,7 @@ function drawOverlay() {
   const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height);
   const im = CUR(); if (!im || !im.fullW) return;
   if (state.tab === 'local') { drawLocalOverlay(ctx); return; }
+  if (state.tab === 'heal') { drawHealOverlay(ctx); return; }
   if (!state.cropMode) return;
   const G = currentGeometry(); const c = im.params.geo.crop;
   const [x0, y0] = frameToScreen(c.x * G.Wr, c.y * G.Hr), [x1, y1] = frameToScreen((c.x + c.w) * G.Wr, (c.y + c.h) * G.Hr);
@@ -3269,10 +3496,35 @@ function cropHit(sx, sy) {
   return { l: nx, r: px, t: ny, b: py, move: !nx && !px && !ny && !py && sx > x0 && sx < x1 && sy > y0 && sy < y1 };
 }
 view.style.touchAction = 'none';
+// spot tool: tap adds a spot (auto source), drag a circle to move it, drag the dashed circle to change the source
+view.addEventListener('pointerdown', e => {
+  if (state.tab !== 'heal' || !CUR() || !CUR().fullW) return;
+  if (healUI.tap && healUI.tap.id !== e.pointerId) { healUI.tap = null; return; } // second finger: pinch, not a tap
+  if (e.button !== 0) return; const [x, y] = canvasPt(e); const hit = healHit(x, y);
+  if (hit) { e.preventDefault(); e.stopImmediatePropagation(); healUI.sel = hit.i; healUI.drag = Object.assign({ id: e.pointerId, moved: false }, hit); (() => { try { view.setPointerCapture(e.pointerId); } catch { } })(); refreshHealUI(); drawOverlay(); return; }
+  healUI.tap = { x, y, id: e.pointerId, t: Date.now() };
+}, true);
+view.addEventListener('pointermove', e => {
+  if (healUI.drag && e.pointerId === healUI.drag.id) {
+    e.stopImmediatePropagation(); const [x, y] = canvasPt(e); const iso = canvasToIso(x, y); const s = CUR().params.spots[healUI.drag.i]; if (!s) return;
+    if (healUI.drag.part === 'dst') { s.x = iso[0]; s.y = iso[1]; } else { s.ox = iso[0] - s.x; s.oy = iso[1] - s.y; }
+    healUI.drag.moved = true; drawOverlay(); clearTimeout(healUI.dt); healUI.dt = setTimeout(() => refreshSpotSource(CUR()), 120); return;
+  }
+  if (healUI.tap && e.pointerId === healUI.tap.id) { const [x, y] = canvasPt(e); if (Math.hypot(x - healUI.tap.x, y - healUI.tap.y) > 10 * dprNow()) healUI.tap = null; }
+}, true);
+view.addEventListener('pointerup', e => {
+  if (healUI.drag && e.pointerId === healUI.drag.id) { e.stopImmediatePropagation(); const moved = healUI.drag.moved; healUI.drag = null; if (moved) { refreshSpotSource(CUR()); commit(); } return; }
+  const t = healUI.tap; healUI.tap = null;
+  if (state.tab === 'heal' && t && e.pointerId === t.id && Date.now() - t.t < 450) {
+    const im = CUR(); const [x, y] = canvasPt(e); const iso = canvasToIso(x, y), Lm = Math.max(im.fullW, im.fullH);
+    if (iso[0] < 0 || iso[1] < 0 || iso[0] > im.fullW / Lm || iso[1] > im.fullH / Lm) return;
+    addSpotAt(iso[0], iso[1]);
+  }
+}, true);
 view.addEventListener('pointerdown', e => { if ((state.pickPC || state.pickCR) && CUR() && e.button === 0) { e.preventDefault(); e.stopImmediatePropagation(); pickColorAt(e); } }, true);
 view.addEventListener('pointerdown', e => { if (state.pickWB && CUR() && e.button === 0) { e.preventDefault(); e.stopImmediatePropagation(); pickWBAt(e); } }, true);
 view.addEventListener('pointerdown', e => {
-  if (!CUR()) return; view.setPointerCapture(e.pointerId); const [x, y] = canvasPt(e); ptrs.set(e.pointerId, { x, y });
+  if (!CUR()) return; (() => { try { view.setPointerCapture(e.pointerId); } catch { } })(); const [x, y] = canvasPt(e); ptrs.set(e.pointerId, { x, y });
   if (ptrs.size === 1 && state.tab === 'local' && activeMask() && !spaceDown && e.button === 0 && CUR().fullW) {
     const m = activeMask();
     if (m.type === 'brush') { gesture = { type: 'paint', lastTap: 0 }; state.cursor = [x, y]; strokeStart(x, y); return; }
@@ -3280,7 +3532,7 @@ view.addEventListener('pointerdown', e => {
   }
   if (ptrs.size === 1) {
     const now = Date.now();
-    if (gesture && gesture.lastTap && now - gesture.lastTap < 300 && !state.cropMode) { // double tap: toggle 100% / fit
+    if (gesture && gesture.lastTap && now - gesture.lastTap < 300 && !state.cropMode && state.tab !== 'heal') { // double tap: toggle 100% / fit
       if (state.zoom === 1) { const im = CUR(); const G = currentGeometry(); const fit = Math.min(view.width / G.outW, view.height / G.outH); state.zoom = (im.previewScale || 1) / fit; const cx = view.width / 2, cy = view.height / 2; const k = state.zoom; state.panX = (state.panX - (x - cx)) * k + (x - cx); state.panY = (state.panY - (y - cy)) * k + (y - cy); } else fitView();
       clampPan(); updateZoomLabel(); requestDraw(); gesture = { lastTap: 0 }; return;
     }
@@ -3413,6 +3665,7 @@ async function selectImage(i) {
     if (im.meta && im.meta.width) { const mw = (im.meta.flip & 4) ? im.meta.height : im.meta.width, mh = (im.meta.flip & 4) ? im.meta.width : im.meta.height; if (Math.abs(mw - im.fullW) <= 2 && Math.abs(mh - im.fullH) <= 2) { im.fullW = mw; im.fullH = mh; } }
     state.previewData = { data: r.data, w: r.width, h: r.height, scale: sc, imId: im.id };
     renderer.setSource(r.data, r.width, r.height, sc, im.fullW, im.fullH);
+    healUI.sig = null; healUI.sel = -1; refreshSpotSource(im, true);
     if (r.thumbURL && !im.thumbUrl) { im.thumbUrl = r.thumbURL; updateFilmstrip(); }
     if (r.thumb && !im.thumbBlobUrl) { im.thumbBlobUrl = URL.createObjectURL(new Blob([r.thumb], { type: 'image/jpeg' })); im.thumbUrl = im.thumbBlobUrl; updateFilmstrip(); }
     ti.style.display = 'none';
@@ -3526,6 +3779,7 @@ async function exportImage(im, o, prog) {
   else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: r.scale || 2 }; }
   else { prog('全解析度解碼，請稍候…', 0.02); const q = o.demosaic === 'auto' ? undefined : +o.demosaic; const r = await decodeFile(im.file, { half: false, quality: q }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 1 }; }
   if (state.cancelExport) return null;
+  if ((params.spots || []).length) { const data = src === state.previewData ? new Uint16Array(src.data) : src.data; applySpotsToBuffer(data, src.w, src.h, src.scale, params.spots, im); src = Object.assign({}, src, { data }); }
   const fullW = src.w * src.scale, fullH = src.h * src.scale;
   const G = geometry(params.geo, fullW, fullH);
   let outW = G.outW, outH = G.outH, m = G.m;
@@ -3549,7 +3803,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {

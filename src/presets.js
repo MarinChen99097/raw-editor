@@ -23,7 +23,9 @@ const DEFAULTS = ({
   // local adjustments: [{id, type:'linear'|'radial'|'brush', ...geometry, adj:{...}, invert, lumLo, lumHi, opacity}]
   masks: [],
   // point colour: [{L, a, b (picked, oklab), hue, sat, lum, range}] up to 4
-  pointColors: []
+  pointColors: [],
+  // spot removal / red eye (see heal module in app.js)
+  spots: []
 });
 // defaults for one local-adjustment mask (slider paths 'M.xxx' resolve against the active mask)
 const PC_DEFAULTS = { hue: 0, sat: 0, lum: 0, range: 40 };

@@ -99,6 +99,13 @@ class Renderer {
     this.buildBlur(this.src);
     return this.src;
   }
+  // Re-upload new pixel data into the current source texture (same size), e.g. after spot removal. Returns false if it does not fit.
+  updateSourceData(data, w, h) {
+    const gl = this.gl, s = this.src; if (!s || s.w !== w || s.h !== h) return false;
+    gl.bindTexture(gl.TEXTURE_2D, s.tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, data);
+    this._del(this.blur); this.blur = null; this.buildBlur(s); return true;
+  }
   // Build the blurred luminance texture (used for clarity) from a source texture.
   buildBlur(src) {
     const gl = this.gl;
