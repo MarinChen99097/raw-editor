@@ -366,7 +366,7 @@ button:focus-visible, [role="slider"]:focus-visible, select:focus-visible, input
 #menuInfo .sec { display: block; }
 
 /* ---------- toast ---------- */
-#toast { position: fixed; left: 50%; top: calc(var(--size-topbar) + var(--sat) + 10px); transform: translateX(-50%); display: none; align-items: center; gap: var(--space-8); max-width: calc(100% - 24px); padding: var(--space-8) var(--space-12); border-radius: var(--radius-lg); background: var(--surface-overlay); border: 1px solid var(--line); box-shadow: var(--shadow-float); font: 400 13px/18px var(--font-sans); color: var(--ink); z-index: 60; }
+#toast { position: fixed; left: 50%; top: calc(var(--size-topbar) + var(--sat) + 10px); transform: translateX(-50%); width: max-content; display: none; align-items: center; gap: var(--space-8); max-width: calc(100% - 24px); padding: var(--space-8) var(--space-12); border-radius: var(--radius-lg); background: var(--surface-overlay); border: 1px solid var(--line); box-shadow: var(--shadow-float); font: 400 13px/18px var(--font-sans); color: var(--ink); z-index: 60; }
 #toast.on { display: inline-flex; animation: re-toast-in 160ms ease-out; }
 #toast.err { background: var(--danger-soft); border-color: var(--danger); }
 #toast .ok { color: var(--success); } #toast .err { color: var(--danger); }
