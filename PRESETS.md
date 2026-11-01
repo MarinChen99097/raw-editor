@@ -1,0 +1,307 @@
+# 預設集來源
+
+每個預設都只是把一般滑桿（曝光、對比、HSL、曲線、色調分級、顆粒…）調到特定數值，套用後可以再調整。
+
+研究來的配方原本以 Lightroom 的滑桿數值記錄，轉換到本程式時做了這些換算：亮部、白色、黑色 ×0.6，陰影 ×0.8，HSL 色相 ×0.8，負的去朦朧 ×0.5，正的去朦朧 ×0.8，色調分級飽和度 ×1.3。這些倍率是用幾張測試照片目視比對後決定的，不是精確對應。
+
+「可信度」表示來源之間的一致程度：high 是多個來源一致，low 是只有一兩個來源。這些都是模仿外觀的近似值，不是相機或底片的實測。
+
+## 基本
+
+- **自然增強**：小幅提升對比與鮮豔度。本程式原有的預設。
+- **人像柔和**：柔化膚質、低對比。本程式原有的預設。
+- **鮮豔風景**：天空更藍、綠更濃。本程式原有的預設。
+- **高對比街拍**：低飽和、硬調、暗角。本程式原有的預設。
+- **柔焦夢幻**：柔光、暖調。本程式原有的預設。
+- **HDR 細節**：亮暗部都拉回來。本程式原有的預設。
+
+## 富士底片模擬
+
+- **Provia 標準**（Fujifilm Provia / Standard，可信度 medium）：PROVIA · 富士預設色，自然中等飽和。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/provia/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://www.fujirumors.com/?p=33793
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Provia.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Slide/Fuji%20Provia%20100F.xmp
+  - https://pixls-discuss.s3.amazonaws.com/original/2X/d/dad479e2e6f31fe7474eef1ae396cbb7e2a218d3.pp3
+  - https://discuss.pixls.us/t/common-color-curves-portra-provia-velvia/2154
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Slide_Fuji%20Provia%20100F.dtstyle
+- **Velvia 鮮豔**（Fujifilm Velvia / Vivid，可信度 high）：Velvia · 高飽和高對比，風景用。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/velvia/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Velvia.xmp
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fuji%20-%20Velvia_50.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Slide/Fuji%20Velvia%2050.xmp
+  - https://pixls-discuss.s3.amazonaws.com/original/2X/e/eca27031bbf3bc5768cf552e1d5444538e7be006.pp3
+  - https://discuss.pixls.us/t/common-color-curves-portra-provia-velvia/2154
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Slide_Fuji%20Velvia%2050.dtstyle
+- **Astia 柔和**（Fujifilm Astia / Soft，可信度 medium）：ASTIA · 柔和反差，膚色好看。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/astia/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://www.fujirumors.com/?p=33793
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Astia.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Slide/Fuji%20Astia%20100F.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Slide_Fuji%20Astia%20100F.dtstyle
+- **經典正片**（Fujifilm Classic Chrome，可信度 high）：Classic Chrome · 低飽和、陰影偏冷。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/classic-chrome/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://www.jmpeltier.com/fujifilm-classic-chrome-vs-classic-neg/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fujifilm%20Classic%20Chrome.xmp
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Classic_Chrome.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/research/Fujifilm-Classic-Chrome/community-recipes.md
+  - https://www.dpreview.com/forums/thread/4326689
+  - https://fujixweekly.com/2022/07/28/fujifilm-x-trans-i-film-simulation-recipe-faux-classic-chrome/
+- **經典負片**（Fujifilm Classic Negative，可信度 medium）：Classic Neg · 硬調、青綠陰影。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/classic-neg/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://www.jmpeltier.com/fujifilm-classic-chrome-vs-classic-neg/
+  - https://www.jmpeltier.com/classic-neg-vs-nostalgic-neg-comparison/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fujifilm%20Classic%20Negative.xmp
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Classic_Neg.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/research/Fujifilm-Classic-Negative/community-recipes.md
+  - https://fujixweekly.com/2023/09/12/new-reala-ace-film-simulation
+  - https://seimeffects.com/2019/11/03/fuji-classic-negative-presets/
+  - https://morewithwes.gumroad.com/l/classicnegative
+- **懷舊負片**（Fujifilm Nostalgic Negative，可信度 medium）：Nostalgic Neg · 琥珀暖調、柔和陰影。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/nostalgic-neg/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://www.jmpeltier.com/classic-neg-vs-nostalgic-neg-comparison/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://fujixweekly.com/2025/09/11/nostalgic-negative-makes-your-photos-feel-like-memories/
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Nostalgic_Neg.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fujifilm-Nostalgic-Negative.xmp
+  - https://jssfr.de/dtsolve/2026-01-02-darktable-styles-fujifilm.html
+- **Pro Neg Hi**（Fujifilm PRO Neg. Hi，可信度 low）：人像負片 · 稍硬調、低飽和。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/pro-neg-hi/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/pro-neg-std/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://www.fujirumors.com/?p=33793
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20PRO_Neg_Hi.xmp
+- **Pro Neg Std**（Fujifilm PRO Neg. Std，可信度 low）：人像負片 · 最柔和、低飽和。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/pro-neg-std/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/pro-neg-hi/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://www.fujirumors.com/?p=33793
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20PRO_Neg_Std.xmp
+- **Eterna 電影**（Fujifilm Eterna / Cinema，可信度 medium）：ETERNA · 平淡低飽和、陰影通透。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/eterna/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Eterna.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fujifilm-Eterna.xmp
+- **Eterna 漂白**（Fujifilm Eterna Bleach Bypass，可信度 high）：Bleach Bypass · 高反差、近黑白。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/eterna-bleach-bypass/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://fujixweekly.com/2026/06/23/eterna-bleach-bypass-is-an-underrated-film-simulation/
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Bleach_Bypass.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Creative/Fujifilm-Eterna-Bleach-Bypass.xmp
+- **Reala Ace**（Fujifilm Reala Ace，可信度 low）：REALA ACE · 忠實色彩、亮部清爽。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/reala-ace/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://fujixweekly.com/2023/09/12/new-reala-ace-film-simulation
+  - https://petapixel.com/2024/06/27/fujifilm-brings-reala-ace-film-simulation-to-four-more-cameras
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fujifilm%20-%20Reala_Ace.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fuji%20Reala%20100.xmp
+- **Acros 黑白**（Fujifilm Acros，可信度 medium）：ACROS · 細膩灰階、細顆粒。
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/acros/
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/
+  - https://jmpeltier.com/fujifilm-film-simulation-differences/
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Monochrome/Fujifilm%20-%20Acros.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Black-White/Fujifilm%20Acros.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Black%20and%20White_Fuji%20Neopan%20Acros%20100.dtstyle
+
+## 日系
+
+- **霧面日系**：霧面黑、淡暖、細顆粒。本程式原有的預設。
+- **清新綠意**：綠色明亮偏黃綠。本程式原有的預設。
+- **日系清新**（Japanese Fresh，可信度 medium）：明亮低反差、綠偏薄荷。
+  - https://www.tenorshare.tw/editing/lightroom-color-grading.html
+  - https://jinrihdeliver.pixnet.net/blog/posts/17276861112
+  - https://tuchong.com/1539723/t/15929684/
+  - https://www.dcfever.com/column/read.php?id=5238
+  - https://www.dcfever.com/column/read.php?id=5430
+  - https://kikinote.net/97698
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Seasonal/Fresh%20Pastel.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Color-Negative/Fujifilm%20Pro%20400H.xmp
+- **空氣感**（Japanese Airy / Toumeikan (Transparent)，可信度 medium）：透明感 · 高亮、低飽和、淡青。
+  - https://note.com/tauon_qoo/n/n9badbe0f8d05
+  - https://camera-photo-blog.com/2021/08/16/%E3%80%90lightroom%E3%80%91%E3%83%AC%E3%82%BF%E3%83%83%E3%83%81%E3%81%A7%E9%80%8F%E6%98%8E%E6%84%9F%E3%81%AE%E3%81%82%E3%82%8B%E5%86%99%E7%9C%9F%E3%81%AB%E3%81%99%E3%82%8B%E6%96%B9%E6%B3%95/
+  - https://camerawokamaete.com/0026-manabu-toumeikan/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Light%20and%20Airy%20Fine%20Art.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Pastel%20Anime%20Aethereal.xmp
+  - https://theeditingstudio.co/blog/light-and-airy-presets
+  - https://www.piczy.info/lightroom/preset/
+  - https://techd.blog/lightroom-preset-howto/
+- **日系膠片**（Japanese Film / Emoi，可信度 high）：エモい · 褪色黑、暖亮部、顆粒。
+  - https://www.cameranonaniwa.co.jp/blogs/2220569966/
+  - https://www.hideyukisaito.com/color-grading/13522/
+  - https://camera-photo-blog.com/2022/07/12/lightroom%E3%81%A7%E3%83%95%E3%82%A3%E3%83%AB%E3%83%A0%E3%82%AB%E3%83%A1%E3%83%A9%E9%A2%A8%E3%81%AB%E3%83%AC%E3%82%BF%E3%83%83%E3%83%81%E3%81%99%E3%82%8B%E7%B0%A1%E5%8D%98%E3%81%AA%E6%96%B9%E6%B3%95/
+  - https://camera-photo-blog.com/2022/07/11/lightroom%E3%81%A7%E3%83%AC%E3%83%88%E3%83%AD%E9%A2%A8%E3%80%81%E3%82%A8%E3%83%A2%E3%81%84%E6%84%9F%E3%81%98%E3%81%AB%E3%83%AC%E3%82%BF%E3%83%83%E3%83%81%E3%81%99%E3%82%8B%E6%96%B9%E6%B3%95/
+  - https://github.com/sigufh/filmsight/blob/main/presetlr/japan_color.xmp
+  - https://presetpedia.com/japan-lightroom-presets/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Color-Negative/Fujicolor%20C200.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Color-Negative/Fuji%20Superia%20X-TRA%20400.xmp
+  - https://ikora-128.com/article/emo-lightroom.html
+  - https://note.com/mitchy_note/n/ndcdcf4a6d197
+  - https://www.yamamotomasao.jp/lightroom-film-presets-guide/
+- **奶油肌**（Japanese Creamy Skin Portrait，可信度 medium）：人像 · 柔亮膚色、低對比。
+  - https://www.toutiao.com/zixun/7532673292164106255
+  - https://zhuanlan.zhihu.com/p/330184956
+  - https://www.sohu.com/a/537559137_121119313
+  - https://kikinote.net/97698
+  - https://www.tenorshare.tw/editing/lightroom-color-grading.html
+  - https://tuchong.com/1539723/t/15929684/
+  - https://loumarkspresets.com/blogs/lightroom/how-to-make-skin-glow-in-lightroom
+- **夏日青藍**（Summer Cyan Sea，可信度 low）：海邊天空更青、白色乾淨。
+  - https://www.pixpretty.com/photography-tips/seaside-shooting-settings-reference.html
+  - https://k.sina.cn/article_6940138496_19daa1c0000100tyue.html
+  - https://www.163.com/dy/article/FCBHIGFF0545GZAX.html
+  - https://www.lemon8-app.com/@soel.wedding/7279367334555517446?region=jp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Seasonal/Beach%20Bright.xmp
+  - https://github.com/sigufh/filmsight/blob/main/presetlr/seaside_positruit.xmp
+  - https://www.dcfever.com/column/read.php?id=5238
+- **奶茶色**（Korean Milk-Tea Beige，可信度 medium）：韓系 · 暖棕低飽和、綠變卡其。
+  - https://christ1027.pixnet.net/blog/post/324384039-%E3%80%90lightroom%E6%95%99%E5%AD%B8%E3%80%91%E8%89%B2%E8%AA%BF%E6%95%B8%E6%93%9A%E5%88%86%E4%BA%AB%E2%99%A5
+  - https://www.tenorshare.tw/editing/lightroom-color-grading.html
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Beige-Cream.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Cozy-Espresso.xmp
+  - https://www.sohu.com/a/537559137_121119313
+  - https://www.popdaily.com.tw/forum/life/618360
+
+## 電影感
+
+- **復古暖調**：暖黃、褪色、暗角。本程式原有的預設。
+- **冷調藍夜**：偏藍、壓暗、暗角。本程式原有的預設。
+- **懷舊電影**（Nostalgic Movie，可信度 medium）：褪色黑、青陰影、暖亮部、顆粒。
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Kodak-2383-Print-Film.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Moody%20Cinematic%20Film%20-%20Creator%20Tuned.xmp
+  - https://theeditingstudio.co/blog/90s-film-look-in-lightroom
+  - https://cinemorapresets.com/blog/how-to-recreate-film-look-lightroom
+  - https://presetpedia.com/vintage-lightroom-presets/
+  - https://www.diyphotography.net/cinematic-color-grading-lightroom/
+  - https://github.com/thepixelabs/lightbox/blob/main/assets/presets/Retro/Warm%20Archive.xmp
+- **港風王家衛**（Hong Kong 90s / Wong Kar-wai，可信度 medium）：青綠陰影、暖紅亮部、濃紅。
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Wong%20Kar-Wai%2080s%20Hong%20Kong.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/research/Wong-Kar-Wai-Hong-Kong/community-recipes.md
+  - https://post.smzdm.com/p/agg4kz0m/
+  - https://github.com/sigufh/filmsight/blob/main/presetlr/hongkong_color.xmp
+  - https://www.16xx8.com/photoshop/jiaocheng/2019/148249_all.html
+  - http://www.360doc.com/content/22/0408/05/140872_1025352191.shtml
+- **港風暖黃**（Hong Kong Retro Warm，可信度 low）：暖黃復古、柔和、亮膚。
+  - https://post.smzdm.com/p/agg4kz0m/
+  - https://www.16xx8.com/photoshop/jiaocheng/2019/148249_all.html
+- **青橙電影**（Teal & Orange，可信度 high）：青色陰影、橘色膚色與亮部。
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Cinematic%20Teal%20and%20Orange.xmp
+  - https://github.com/mfzamudio/lr-mz-presets/blob/main/assets/presets/teal-orange.xmp
+  - https://github.com/thepixelabs/lightbox/blob/main/crates/lightbox-edit/assets/retired-starter-presets/Color/Teal%20and%20Orange.xmp
+  - https://www.yituss.com/1744.html
+  - https://blog.csdn.net/u014723479/article/details/104088619
+  - https://presetpedia.com/japan-lightroom-presets/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Geographic/K-Drama%20Cinematic.xmp
+  - https://expertphotography.com/teal-and-orange-lightroom
+  - https://shotkit.com/teal-orange-look/
+  - https://learn.zoner.com/color-grading-step-by-step-iii-how-to-get-the-popular-teal-orange-look/
+- **復古褪色**（Vintage Faded Print，可信度 high）：老照片 · 乳白黑、暖棕、粗顆粒。
+  - https://pixelpeeper.com/lightroom-presets/faded-gold
+  - https://presetpedia.com/vintage-lightroom-presets/
+  - https://camera-photo-blog.com/2022/07/11/lightroom%E3%81%A7%E3%83%AC%E3%83%88%E3%83%AD%E9%A2%A8%E3%80%81%E3%82%A8%E3%83%A2%E3%81%84%E6%84%9F%E3%81%98%E3%81%AB%E3%83%AC%E3%82%BF%E3%83%83%E3%83%81%E3%81%99%E3%82%8B%E6%96%B9%E6%B3%95/
+  - https://github.com/thepixelabs/lightbox/blob/main/assets/presets/Retro/Instant%20Fade.xmp
+  - https://github.com/thepixelabs/lightbox/blob/main/assets/presets/Retro/Warm%20Archive.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Matte%20Fade.xmp
+  - https://github.com/mfzamudio/lr-mz-presets/blob/main/assets/presets/matte-dark.xmp
+  - https://darkroom.co/help/guide/vintage-film.md
+  - https://www.tenorshare.tw/editing/lightroom-color-grading.html
+- **暗黑 Moody**（Dark Moody Forest，可信度 medium）：壓暗、低飽和、綠變橄欖。
+  - https://theeditingstudio.co/blog/how-to-get-dark-moody-look-lightroom
+  - https://www.lightroomtutorials.com/jungle-green/
+  - https://www.lightroomtutorials.com/dark-and-moody/
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Deep-Forest-Green.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Moody%20PNW.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Deep-Moody-Shadow.xmp
+  - https://github.com/thepixelabs/lightbox/blob/main/assets/presets/Verdant/Moss%20and%20Slate.xmp
+  - https://github.com/thepixelabs/lightbox/blob/main/crates/lightbox-edit/assets/retired-starter-presets/Landscape/Landscape%20Moody.xmp
+- **夜景霓虹**（Neon Night / Cyberpunk，可信度 medium）：賽博 · 冷藍陰影、洋紅亮部。
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Creative/Cyberpunk%20Neon%20City.xmp
+  - https://github.com/peva3/EmulsionPresets/blob/main/Presets/Geographic/Tokyo%20Neon%20Night.xmp
+  - https://github.com/thepixelabs/lightbox/blob/main/assets/presets/Neon/Neon%20Rain.xmp
+  - https://github.com/thepixelabs/lightbox/blob/main/assets/presets/Neon/Midnight%20Arcade.xmp
+  - https://presetpedia.com/japan-lightroom-presets/
+  - https://presetpedia.com/night-lightroom-presets/
+  - https://www.sohu.com/a/673368468_121119376
+  - https://k.sina.cn/article_5720266525_154f4571d01901u6v5.html
+  - https://www.xiaohongshu.com/discovery/item/5ee0885f000000000101ebda
+
+## 經典底片
+
+- **淡雅負片**：低飽和、青陰影、暖亮部。本程式原有的預設。
+- **鮮明底片**：高飽和、紅綠藍更濃。本程式原有的預設。
+- **Portra 400**（Kodak Portra 400，可信度 high）：柯達人像底片 · 暖膚、低反差。
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Kodak%20Portra%20400.xmp
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Kodak/Color/Kodak%20-%20Portra_400.xmp
+  - https://pixls-discuss.s3.amazonaws.com/original/2X/0/02f02ba0585164ef6163b89c276bf61233808b41.pp3
+  - https://discuss.pixls.us/t/common-color-curves-portra-provia-velvia/2154
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Negative_Kodak%20Portra%20400.dtstyle
+  - https://theeditingstudio.co/blog/kodak-portra-400-lightroom-preset
+  - https://mastinlabs.com/blogs/photoism/blog-portra-400-lightroom-authentic-look
+  - https://fujixweekly.com/2022/12/16/kodak-portra-400-v2-fujifilm-x-t5-x-trans-v-film-simulation-recipe/
+  - https://raw.githubusercontent.com/forjd/filmlook/HEAD/recipes/builtin/portra-400-35mm.json
+- **Gold 200**（Kodak Gold 200，可信度 medium）：柯達 · 金黃暖調、紅黃飽和。
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Kodak%20Gold%20200.xmp
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Kodak/Color/Kodak%20-%20Gold_200.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Negative_Kodak%20Gold%20200.dtstyle
+  - https://fujixweekly.com/2020/04/16/my-fujifilm-x-t30-kodak-gold-200-film-simulation-recipe/
+- **Ektar 100**（Kodak Ektar 100，可信度 medium）：柯達 · 高飽和、深藍天空。
+  - https://www.kodak.com/en/still-film/product/professional/ektar-100-film
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Kodak%20Ektar%20100.xmp
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Kodak/Color/Kodak%20-%20Ektar_100.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Negative_Kodak%20Ektar%20100.dtstyle
+  - https://fujixweekly.com/2018/06/16/my-fujifilm-x100f-kodak-ektar-100-film-simulation-recipe/
+  - https://gridfiti.com/free-film-lightroom-presets/
+- **Superia 400**（Fujifilm Superia X-TRA 400，可信度 low）：富士日常底片 · 青綠陰影。
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fuji%20Superia%20X-TRA%20400.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Negative_Fuji%20Superia%20400.dtstyle
+  - https://www.fujifilm-x.com/en-au/products/film-simulation/classic-neg/
+  - https://fujixweekly.com/2024/03/20/my-15-favorite-film-simulation-recipes-that-use-classic-negative/
+  - https://fujixweekly.com/2020/12/07/fujifilm-x100v-film-simulation-recipe-superia-premium-400/
+- **Pro 400H**（Fujifilm Pro 400H，可信度 medium）：富士 · 粉嫩、低反差、偏青綠。
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Fuji/Color/Fuji%20-%20400H.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Color-Negative/Fujifilm%20Pro%20400H.xmp
+  - https://theeditingstudio.co/blog/fuji-400h-lightroom-preset
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Negative_Fuji%20Pro%20400H.dtstyle
+  - https://fujixweekly.com/2021/05/16/fujifilm-x100v-x-trans-iv-film-simulation-recipe-fujicolor-pro-400h/
+- **CineStill 800T**（CineStill 800T，可信度 medium）：鎢絲燈電影底片 · 冷青陰影、夜景。
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Kodak/Color/Kodak%20-%20CineStill_800T.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Creative/Cinestill%20800T.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Color%20Negative_CineStill%20800T.dtstyle
+  - https://fujixweekly.com/2020/10/06/fujifilm-x100v-film-simulation-recipe-cinestill-800t/
+  - https://raw.githubusercontent.com/forjd/filmlook/HEAD/recipes/builtin/cinestill-800t.json
+  - https://x-alchemy.app/academy/film-look/cinestill-800t-look
+  - https://www.josephdagostinophotography.com/joedagostino-photo-blog/2020/3/25/recreating-cinestill-800t-for-lightroom
+  - https://cinestill.film/blogs/news/cinestill-film-stock-primer
+
+## 黑白
+
+- **黑白經典**：中反差黑白、細顆粒。本程式原有的預設。
+- **黑白高反差**：濃黑亮白、天空壓暗。本程式原有的預設。
+- **Tri-X 400**（Kodak Tri-X 400，可信度 medium）：柯達黑白 · 濃黑、明顯顆粒。
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Kodak/Monochrome/Kodak%20-%20Tri-X_400.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Black-White/Kodak%20Tri-X%20400.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Black%20and%20White_Kodak%20Tri-X%20400.dtstyle
+  - https://fujixweekly.com/2020/06/18/fujifilm-x100v-film-simulation-recipe-kodak-tri-x-400
+  - https://www.glazerscamera.com/products/tri-x-135-36-400tx-eastman
+- **HP5 Plus**（Ilford HP5 Plus 400，可信度 medium）：Ilford 黑白 · 中反差、柔和灰階。
+  - https://raw.githubusercontent.com/hstockeb/film-simulations-and-presets/HEAD/presets/Ilford/Monochrome/Ilford%20-%20HP5_Plus.xmp
+  - https://raw.githubusercontent.com/peva3/EmulsionPresets/main/Presets/Black-White/Ilford%20HP5%20Plus.xmp
+  - https://raw.githubusercontent.com/t3mujin/t3mujinpack/master/t3mujinpack%20-%20Black%20and%20White_Ilford%20HP5%20Plus%20400.dtstyle
+  - https://fujixweekly.com/2022/03/23/fujifilm-x-trans-iv-film-simulation-recipe-ilford-hp5-plus-400/
+  - https://www.ilfordphoto.com/film-review-ilford-hp5-plus-emulsive/
+

@@ -252,7 +252,13 @@ void main(){
   float dehaze = clamp(u_dehaze + lDeh, -1.0, 1.0);
   if(abs(dehaze) > 0.001){
     float A = 0.8;
-    if(dehaze > 0.0){ float t = 1.0 - dehaze*0.45; c = (c - A*(1.0-t))/t; }
+    if(dehaze > 0.0){
+      // remove a veil from luminance with a soft toe (L^2(1+v)/(L+v)): no per-channel clipping, so dark areas don't turn into
+      // saturated blue/black blotches; then restore some of the colour a haze washes out
+      float t = 1.0 - dehaze*0.45; float v = A*(1.0-t)/t;
+      float L = max(dot(c, LUMA), 1e-6); float Ln = L*L*(1.0+v)/(L+v);
+      c *= Ln/L; c = mix(vec3(Ln), c, 1.0 + 0.4*dehaze);
+    }
     else { float k = -dehaze*0.5; c = c*(1.0-k) + A*k; }
     c = max(c, 0.0);
   }

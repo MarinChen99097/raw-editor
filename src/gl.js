@@ -199,9 +199,9 @@ class Renderer {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   // Read back a small render for the histogram: returns Uint8Array RGBA
-  readSmall(U, G, maxW = 320) {
+  readSmall(U, G, maxW = 320, into = 'hist') {
     const gl = this.gl; const q = Math.min(1, maxW / G.outW);
-    const R = this.renderResult(U, G, q, 'hist');
+    const R = this.renderResult(U, G, q, into);
     const px = new Uint8Array(R.w * R.h * 4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb); gl.readPixels(0, 0, R.w, R.h, gl.RGBA, gl.UNSIGNED_BYTE, px); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return { px, w: R.w, h: R.h };

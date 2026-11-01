@@ -174,11 +174,29 @@ function uniformsFromParams(p, im, opts = {}) {
   U.showMask = (!opts.export && im && im === CUR() && state.tab === 'local' && state.showMask && state.maskSel >= 0 && state.maskSel < U.nMasks) ? state.maskSel : -1;
   return U;
 }
+// Colour-grading hue sliders use ordinary RGB hue (0 red, 60 yellow, 120 green, 180 cyan, 240 blue, 300 magenta, as drawn on
+// the slider and as in Lightroom). The shader works in OkLab, so convert to the OkLab hue angle of that RGB colour.
+const OK_HUE = (() => {
+  const lin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const t = [];
+  for (let i = 0; i < 360; i++) {
+    const h = i / 60, x = 1 - Math.abs(h % 2 - 1); const [r, g, b] = h < 1 ? [1, x, 0] : h < 2 ? [x, 1, 0] : h < 3 ? [0, 1, x] : h < 4 ? [0, x, 1] : h < 5 ? [x, 0, 1] : [1, 0, x];
+    const R = lin(r), G = lin(g), B = lin(b);
+    const l = Math.cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B), m = Math.cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B), s = Math.cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B);
+    const A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s, Bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+    const n = Math.hypot(A, Bb); t.push([A / n, Bb / n]);
+  }
+  return t;
+})();
+function okHueRad(deg) { // interpolate unit vectors so the 359 -> 0 wrap is smooth
+  const d = ((deg % 360) + 360) % 360, i = Math.floor(d), f = d - i, a = OK_HUE[i], b = OK_HUE[(i + 1) % 360];
+  return Math.atan2(a[1] + (b[1] - a[1]) * f, a[0] + (b[0] - a[0]) * f);
+}
 function baseUniforms(p) {
   const t = p.temp / 100, ti = p.tint / 100;
   let wb = [1 + 0.45 * t, 1 - 0.25 * ti, 1 - 0.45 * t]; wb = wb.map(v => Math.max(0.05, v));
   const L = 0.2126 * wb[0] + 0.7152 * wb[1] + 0.0722 * wb[2]; wb = wb.map(v => v / L);
-  const g = r => { const a = (r.h || 0) * Math.PI / 180, s = (r.s || 0) / 100 * 0.12; return [(r.l || 0) / 100 * 0.15, s * Math.cos(a), s * Math.sin(a)]; };
+  const g = r => { const a = okHueRad(r.h || 0), s = (r.s || 0) / 100 * 0.12; return [(r.l || 0) / 100 * 0.15, s * Math.cos(a), s * Math.sin(a)]; };
   const hsl = []; for (let i = 0; i < 8; i++) hsl.push(p.hsl.h[i] / 100, p.hsl.s[i] / 100, p.hsl.l[i] / 100);
   return {
     exposure: Math.pow(2, p.exposure), wb,
@@ -328,8 +346,9 @@ function selectTab(id) {
   }
   const wasLocal = !!selectTab.prevLocal; selectTab.prevLocal = id === 'local';
   const wasCrop = state.cropMode; state.cropMode = id === 'crop'; state.cursor = null;
-  $('#side').classList.toggle('tall', id === 'curve' || id === 'hsl');
+  $('#side').classList.toggle('tall', id === 'curve' || id === 'hsl' || id === 'presets');
   if (id === 'curve') setTimeout(() => curveEd.draw(), 0);
+  if (id === 'presets') schedulePresetThumbs();
   if (wasCrop !== state.cropMode) { if (!state.cropMode) commit(); fitView(); requestRender(false); }
   else if (CUR() && wasLocal !== (id === 'local') && state.showMask && state.maskSel >= 0) requestRender(false); // red mask overlay on/off
   else drawOverlay(); // handles / crop frame only
@@ -477,33 +496,103 @@ function setAspect(k) {
 function refreshCropUI() { const im = CUR(); if (!im || !cropUI.chips) return; const g = im.params.geo; [...cropUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.a === g.aspect)); $('#flipH').classList.toggle('on', g.flipH); $('#flipV').classList.toggle('on', g.flipV); }
 
 // ---------- presets panel ----------
+// Presets only set ordinary sliders (see PRESETS in presets.js), so everything stays adjustable afterwards.
+const PRESET_CATS = [['basic', '基本'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['user', '我的']];
 let presetUI = {};
+let presetCat = 'fuji'; try { presetCat = localStorage.getItem('rawedit:pcat') || 'fuji'; } catch { }
 function buildPresetPanel(sec) {
   sec.append(hdr('預設集', el('button', { onclick: savePresetDialog }, '＋ 儲存目前設定')));
+  const chips = el('div', { class: 'pcats' }); sec.append(chips); presetUI.chips = chips;
   const amt = makeSlider('_presetAmount', '強度', 0, 150, 1, fmt.pos); sec.append(amt);
   const grid = el('div', { class: 'presets' }); sec.append(grid); presetUI.grid = grid;
-  sec.append(el('div', { class: 'hint' }, '預設集只影響調色，不影響裁切。套用後可再微調任何滑桿；調整「強度」會以目前照片為基準重新套用。'));
+  sec.append(el('div', { class: 'hint' }, '點一下套用，換別的預設會直接取代、不會疊加。預設集只是幫你拉好滑桿，套用後每個滑桿都能再調；「強度」以套用前的照片為基準重新計算。不影響裁切、局部調整與鏡頭校正。'));
   renderPresetGrid();
 }
 // the amount slider lives outside params: emulate a param path on a side object
 for (const d of [DEFAULTS, IMG_DEFAULTS]) Object.defineProperty(d, '_presetAmount', { value: 100, enumerable: false });
 function renderPresetGrid() {
   const grid = presetUI.grid; if (!grid) return; grid.innerHTML = '';
-  PRESETS.forEach((p, i) => grid.append(el('button', { 'data-id': 'b' + i, onclick: () => applyPresetUI(p, 'b' + i) }, p.name, el('small', {}, p.en))));
-  userPresets.forEach((p, i) => grid.append(el('button', { class: 'user', 'data-id': 'u' + i, onclick: () => applyPresetUI(p, 'u' + i), oncontextmenu: e => { e.preventDefault(); if (confirm('刪除預設集「' + p.name + '」？')) { userPresets.splice(i, 1); saveUserPresets(); renderPresetGrid(); } } }, p.name, el('small', {}, p.en || '我的預設 · 長按/右鍵刪除'))));
-  refreshPresetUI();
+  presetUI.chips.innerHTML = '';
+  for (const [id, name] of PRESET_CATS) presetUI.chips.append(el('button', { class: id === presetCat ? 'on' : '', onclick: () => { presetCat = id; try { localStorage.setItem('rawedit:pcat', id); } catch { } renderPresetGrid(); } }, name));
+  const items = presetCat === 'user'
+    ? userPresets.map((p, i) => ({ p, id: 'u' + i, user: true, i }))
+    : PRESETS.map((p, i) => ({ p, id: 'b:' + (p.id || i) })).filter(x => (x.p.cat || 'basic') === presetCat);
+  const card = (it, label, sub) => {
+    const cv = el('canvas', { class: 'pthumb', width: 300, height: 200 });
+    const attrs = { class: 'pcard' + (it.user ? ' user' : ''), 'data-id': it.id, onclick: () => it.id === 'none' ? clearPresetUI() : applyPresetUI(it.p, it.id) };
+    if (it.user) attrs.oncontextmenu = e => { e.preventDefault(); if (confirm('刪除預設集「' + it.p.name + '」？')) { userPresets.splice(it.i, 1); saveUserPresets(); renderPresetGrid(); } };
+    const b = el('button', attrs, cv, el('span', { class: 'pn' }, label), el('small', {}, sub));
+    grid.append(b); return { btn: b, canvas: cv, preset: it.id === 'none' ? null : it.p, id: it.id, sig: '' };
+  };
+  presetUI.cards = [card({ id: 'none' }, '原圖', '不套用預設')];
+  for (const it of items) presetUI.cards.push(card(it, it.p.name, it.p.d || it.p.en || (it.user ? '我的預設 · 長按/右鍵刪除' : '')));
+  if (presetCat === 'user' && !items.length) grid.append(el('div', { class: 'hint' }, '還沒有自己的預設。調好一張照片後，按上方「＋ 儲存目前設定」。'));
+  refreshPresetUI(); schedulePresetThumbs();
+}
+// Params a preset is applied on top of: switching between presets starts again from the pre-preset photo instead of stacking.
+// Sliders the user moved after applying the preset are kept (they override the pre-preset values).
+function presetBaseFor(im) {
+  if (!im.presetId || !im.presetBase || !im.presetResult) return im.params;
+  const cur = stripAmount(im.params); if (JSON.stringify(cur) === im.presetResult) return im.presetBase;
+  const res = JSON.parse(im.presetResult), base = clone(im.presetBase);
+  for (const k of Object.keys(cur)) { if (k === 'geo' || k === 'masks' || k === 'lens') continue; if (JSON.stringify(cur[k]) !== JSON.stringify(res[k])) base[k] = clone(cur[k]); }
+  return base;
 }
 function applyPresetUI(p, id, fromAmount) {
   const im = CUR(); if (!im) return;
-  if (im.presetBase === undefined || im.presetId !== id) { im.presetBase = clone(im.params); im.presetId = id; im.presetObj = p; }
+  { const base = presetBaseFor(im); if (base !== im.presetBase) im.presetBase = clone(stripAmount(base)); im.presetId = id; im.presetObj = p; }
   const amount = (im.params._presetAmount ?? 100) / 100;
   const np = applyPreset(im.presetBase, p.p, amount); np.geo = im.params.geo; np.masks = im.params.masks; np.lens = im.params.lens; np._presetAmount = im.params._presetAmount ?? 100; im.params = np;
+  im.presetResult = JSON.stringify(stripAmount(np));
   refreshAll(); if (!fromAmount) commit(); else { clearTimeout(applyPresetUI.t); applyPresetUI.t = setTimeout(commit, 400); }
 }
-function refreshPresetUI() { const im = CUR(); if (!presetUI.grid) return; [...presetUI.grid.children].forEach(b => b.classList.toggle('on', !!im && im.presetId === b.dataset.id)); }
+function clearPresetUI() {
+  const im = CUR(); if (!im || !im.presetId) return;
+  const base = presetBaseFor(im); if (base === im.params) { im.presetId = null; refreshPresetUI(); return; }
+  const np = clone(base); np.geo = im.params.geo; np.masks = im.params.masks; np.lens = im.params.lens; im.params = np; im.presetId = null; im.presetResult = null;
+  refreshAll(); commit();
+}
+function refreshPresetUI() {
+  const im = CUR(); if (!presetUI.cards) return;
+  const cur = im && im.presetId && JSON.stringify(stripAmount(im.params)) === im.presetResult ? im.presetId : 'none';
+  for (const c of presetUI.cards) c.btn.classList.toggle('on', !!im && c.id === cur);
+}
+// Live thumbnails: each preset rendered from the current photo (small GPU render, a few per frame so the UI stays responsive)
+const presetThumbJob = { seq: 0 };
+function schedulePresetThumbs() {
+  const seq = ++presetThumbJob.seq; const im = CUR();
+  if (!im || state.tab !== 'presets' || !presetUI.cards || !renderer.src || !state.previewData || state.previewData.imId !== im.id) return;
+  const base = stripAmount(presetBaseFor(im)); const G = geometry(im.params.geo, im.fullW, im.fullH);
+  const sig = im.id + '|' + JSON.stringify(base) + '|' + G.outW + 'x' + G.outH;
+  const todo = presetUI.cards.filter(c => c.sig !== sig); let i = 0;
+  const step = () => {
+    if (seq !== presetThumbJob.seq || CUR() !== im || state.tab !== 'presets') return;
+    const t0 = performance.now();
+    try { while (i < todo.length && performance.now() - t0 < 24) { drawPresetThumb(im, base, G, todo[i]); todo[i].sig = sig; i++; } }
+    finally { renderer.setCurveLUT(curveEd.lutRGBA()); } // thumbnails swap the curve LUT; restore it for the main view
+    if (i < todo.length) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+function drawPresetThumb(im, base, G, card) {
+  const p = card.preset ? applyPreset(base, card.preset.p, 1) : base;
+  const U = uniformsFromParams(p, im, {}); U.showMask = -1;
+  const ce = presetUI.ce || (presetUI.ce = new CurveEditor(document.createElement('canvas'), () => { }));
+  ce.curves = clone(p.curves); renderer.setCurveLUT(ce.lutRGBA());
+  const cv = card.canvas, CW = cv.width, CH = cv.height;
+  const fitW = G.outW / G.outH > CW / CH ? Math.round(CH * 2 * G.outW / G.outH) : CW * 2; // render ~2x the box for a clean downscale
+  const { px, w, h } = renderer.readSmall(U, G, fitW, 'pthumb');
+  const tmp = presetUI.tmp || (presetUI.tmp = document.createElement('canvas')); tmp.width = w; tmp.height = h;
+  const img = new ImageData(w, h);
+  img.data.set(px); // the result target is already stored top row first (draw() flips it for the screen)
+  tmp.getContext('2d').putImageData(img, 0, 0);
+  const g = cv.getContext('2d'); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  const s = Math.max(CW / w, CH / h), dw = w * s, dh = h * s; // cover
+  g.drawImage(tmp, (CW - dw) / 2, (CH - dh) / 2, dw, dh);
+}
 function savePresetDialog() {
   const im = CUR(); if (!im) return; const name = prompt('預設集名稱：', '我的預設 ' + (userPresets.length + 1)); if (!name) return;
-  userPresets.push({ name, p: paramsToPreset(im.params) }); saveUserPresets(); renderPresetGrid(); toast('已儲存預設集');
+  userPresets.push({ name, p: paramsToPreset(im.params) }); saveUserPresets(); presetCat = 'user'; try { localStorage.setItem('rawedit:pcat', 'user'); } catch { } renderPresetGrid(); toast('已儲存到「我的」');
 }
 function saveUserPresets() { try { localStorage.setItem('rawedit:presets', JSON.stringify(userPresets)); } catch { } }
 
@@ -512,7 +601,8 @@ function commit() {
   const im = CUR(); if (!im) return; const snap = JSON.stringify(im.params);
   if (im.hist[im.hi] === snap) return;
   im.hist = im.hist.slice(0, im.hi + 1); im.hist.push(snap); if (im.hist.length > 60) im.hist.shift(); im.hi = im.hist.length - 1;
-  im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(clone(defaultsFor(im))); updateUndoButtons(); saveEdits(im); updateFilmstrip();
+  im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(clone(defaultsFor(im)));
+  if (state.tab === 'presets') { refreshPresetUI(); clearTimeout(commit.pt); commit.pt = setTimeout(schedulePresetThumbs, 500); } updateUndoButtons(); saveEdits(im); updateFilmstrip();
 }
 function stripAmount(p) { const c = clone(p); delete c._presetAmount; return c; }
 function undo() { const im = CUR(); if (!im || im.hi <= 0) return; im.hi--; im.params = JSON.parse(im.hist[im.hi]); im.presetId = null; refreshAll(); updateUndoButtons(); saveEdits(im); }
@@ -898,6 +988,7 @@ async function selectImage(i) {
     ti.style.display = 'none';
     curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveEd.lutRGBA());
     fitCanvas(); fitView(); refreshLensUI(); refreshLocalUI(); requestRender(false); showInfo(); $('#btnExport').disabled = false;
+    schedulePresetThumbs();
     $('#finfo').textContent = `${im.fullW}×${im.fullH} · 預覽 ${r.width}×${r.height} · ${(r.timings.total / 1000).toFixed(1)}s`;
     status('');
     if (im.file._isImage && IS_IOS && /\.jpe?g$/i.test(im.name) && !selectImage.iosHint) { selectImage.iosHint = true; toast('提示：從「照片圖庫」選的照片，iPhone 一律轉成 JPEG 給網頁，RAW 也會被轉。要修 RAW 請按＋選「選擇檔案」。', 8000); }
@@ -1014,7 +1105,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { images, state, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {

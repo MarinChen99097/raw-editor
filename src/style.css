@@ -70,11 +70,17 @@ button:disabled { opacity: .4; cursor: default; }
 .hslbands button { flex: 1; height: 22px; border-radius: 6px; border: 2px solid transparent; padding: 0; }
 .hslbands button.on { border-color: #fff; }
 #curvecv { width: 100%; aspect-ratio: 1 / 1; max-height: 300px; border-radius: 8px; display: block; touch-action: none; }
-.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin: 6px 0; }
-.presets button { text-align: left; padding: 8px 10px; line-height: 1.2; display: flex; flex-direction: column; gap: 2px; }
-.presets button small { color: var(--dim); font-size: 11px; }
-.presets button.on { border-color: var(--accent); }
-.presets button.user { border-style: dashed; }
+.pcats { display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 8px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.pcats::-webkit-scrollbar { display: none; }
+.pcats button { flex: none; border-radius: 999px; padding: 6px 12px; font-size: 13px; }
+.pcats button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); gap: 8px; margin: 6px 0; }
+.presets .pcard { text-align: left; padding: 0; overflow: hidden; line-height: 1.25; display: flex; flex-direction: column; border-width: 2px; }
+.presets .pthumb { width: 100%; aspect-ratio: 3 / 2; display: block; background: var(--panel2); }
+.presets .pn { padding: 6px 8px 1px; font-size: 13px; }
+.presets .pcard small { padding: 0 8px 7px; color: var(--dim); font-size: 11px; }
+.presets .pcard.on { border-color: var(--accent); }
+.presets .pcard.user { border-style: dashed; }
 .info { font-size: 12.5px; color: var(--dim); line-height: 1.7; }
 .info b { color: var(--fg); font-weight: 500; }
 .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
