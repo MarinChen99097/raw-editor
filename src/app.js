@@ -77,7 +77,7 @@ try { state.hq = localStorage.getItem('rawedit:hq') === '1'; state.hist = localS
 // ---------- geometry ----------
 const M = (a, b, c, d, e, f) => [a, b, 0, c, d, 0, e, f, 1];
 function mmul(A, B) { const o = new Array(9); for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) o[c * 3 + r] = A[r] * B[c * 3] + A[3 + r] * B[c * 3 + 1] + A[6 + r] * B[c * 3 + 2]; return o; }
-function mapPt(m, x, y) { return [m[0] * x + m[3] * y + m[6], m[1] * x + m[4] * y + m[7]]; }
+function mapPt(m, x, y) { const w = m[2] * x + m[5] * y + m[8]; return [(m[0] * x + m[3] * y + m[6]) / w, (m[1] * x + m[4] * y + m[7]) / w]; } // projective
 // Returns {outW,outH,m, Wr,Hr, frame:mat (frame px -> full px)} for params.geo over a full image W×H
 function geometry(geo, W, H, ignoreCrop = false) {
   const k = ((geo.rot % 4) + 4) % 4; const Wr = k % 2 ? H : W, Hr = k % 2 ? W : H;
@@ -86,7 +86,17 @@ function geometry(geo, W, H, ignoreCrop = false) {
   const a = geo.angle * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
   const s = Math.cos(Math.abs(a)) + (Math.max(Wr, Hr) / Math.min(Wr, Hr)) * Math.sin(Math.abs(a));
   const Cx = Wr / 2, Cy = Hr / 2;
-  const S = M(ca / s, sa / s, -sa / s, ca / s, Cx - (ca * Cx - sa * Cy) / s, Cy - (sa * Cx + ca * Cy) / s);
+  const rotS = t => M(ca * t, sa * t, -sa * t, ca * t, Cx - (ca * Cx - sa * Cy) * t, Cy - (sa * Cx + ca * Cy) * t); // straighten about the centre, scale t
+  let S = rotS(1 / s);
+  const P = perspPx(geo, Wr, Hr);
+  if (P) { // perspective: zoom (Constrain Crop) so every frame-edge sample stays inside the image, found by bisection
+    let t = 1 / s;
+    if (geo.constrain !== false) {
+      const inside = tt => { const A = mmul(P, rotS(tt)); for (let i = 0; i <= 48; i++) { const u = i / 48; for (const [x, y] of [[u * Wr, 0], [u * Wr, Hr], [0, u * Hr], [Wr, u * Hr]]) { const q = mapPt(A, x, y); if (!(q[0] >= -0.5 && q[1] >= -0.5 && q[0] <= Wr + 0.5 && q[1] <= Hr + 0.5)) return false; } } return true; };
+      if (inside(1)) t = 1; else { let lo = 0.02, hi = 1; for (let it = 0; it < 30; it++) { const mid = (lo + hi) / 2; if (inside(mid)) lo = mid; else hi = mid; } t = lo; }
+    } else t = 1;
+    S = mmul(P, rotS(t));
+  }
   const frame = mmul(Rinv, mmul(F, S));
   const c = ignoreCrop ? { x: 0, y: 0, w: 1, h: 1 } : geo.crop;
   const outW = Math.max(8, Math.round(c.w * Wr)), outH = Math.max(8, Math.round(c.h * Hr));
@@ -589,6 +599,14 @@ function buildCropPanel(sec) {
     el('button', { id: 'flipV', onclick: () => { CUR().params.geo.flipV = !CUR().params.geo.flipV; refreshAll(); commit(); } }, '⇅ 垂直翻轉'));
   sec.append(tools);
   sec.append(makeSlider('geo.angle', '拉直角度', -45, 45, 0.1, v => v.toFixed(1) + '°'));
+  sec.append(el('div', { class: 'toolbar' }, el('button', { onclick: () => autoStraighten() }, '自動拉直')));
+  sec.append(hdr('變形（透視校正）', el('button', { onclick: () => { const g = CUR().params.geo; g.tr = clone(DEFAULTS.geo.tr); g.upright = null; g.uprightMode = 'off'; refreshAll(); fitView(); commit(); } }, '重設')));
+  const up = el('div', { class: 'chips' }); cropUI.upright = up;
+  for (const [k, n] of [['off', '關閉'], ['auto', '自動'], ['level', '水平'], ['vertical', '垂直'], ['full', '完整']]) up.append(el('button', { 'data-u': k, onclick: () => computeUpright(k) }, n));
+  sec.append(el('div', { class: 'hint' }, 'Upright：自動找出照片裡的直線，把建築拉正。'), up);
+  for (const [k, n, mn, mx, st, f] of [['v', '垂直', -100, 100, 1, fmt.int], ['h', '水平', -100, 100, 1, fmt.int], ['rot', '旋轉', -10, 10, 0.1, v => v.toFixed(1) + '°'], ['asp', '長寬比', -100, 100, 1, fmt.int], ['scale', '縮放', 50, 150, 1, fmt.pos], ['ox', 'X 位移', -100, 100, 1, fmt.int], ['oy', 'Y 位移', -100, 100, 1, fmt.int]]) sec.append(makeSlider('geo.tr.' + k, n, mn, mx, st, f));
+  cropUI.constrain = el('button', { onclick: () => { const g = CUR().params.geo; g.constrain = g.constrain === false; refreshAll(); fitView(); commit(); } }, '限制裁切');
+  sec.append(el('div', { class: 'toolbar' }, cropUI.constrain), el('div', { class: 'hint' }, '「限制裁切」開著時會自動放大，避免變形後露出空白邊。'));
   sec.append(hdr('長寬比'));
   const chips = el('div', { class: 'chips' }); cropUI.chips = chips;
   for (const [k, n] of ASPECTS) chips.append(el('button', { 'data-a': k, onclick: () => setAspect(k) }, n));
@@ -613,7 +631,8 @@ function setAspect(k) {
   }
   refreshAll(); commit();
 }
-function refreshCropUI() { const im = CUR(); if (!im || !cropUI.chips) return; const g = im.params.geo; [...cropUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.a === g.aspect)); $('#flipH').classList.toggle('on', g.flipH); $('#flipV').classList.toggle('on', g.flipV); }
+function refreshCropUI() {
+  if (cropUI.upright) { const g = CUR() ? CUR().params.geo : DEFAULTS.geo; [...cropUI.upright.children].forEach(b => b.classList.toggle('on', b.dataset.u === (g.uprightMode || 'off'))); cropUI.constrain.classList.toggle('on', g.constrain !== false); } const im = CUR(); if (!im || !cropUI.chips) return; const g = im.params.geo; [...cropUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.a === g.aspect)); $('#flipH').classList.toggle('on', g.flipH); $('#flipV').classList.toggle('on', g.flipV); }
 
 // ---------- camera calibration ----------
 // Red/green/blue primaries rotated towards their neighbours (hue) and pushed from/to grey (saturation) in linear RGB, then
@@ -1051,6 +1070,186 @@ function refreshHealUI() {
   for (const k of sliders.keys()) if (k.startsWith('S.')) sliders.get(k).update();
 }
 
+// ---------- perspective transform, Upright, auto straighten ----------
+// Adapted from LightCraft (https://github.com/storytold/lightcraft), Copyright (c) 2026 ArtCraft Team and the LightCraft
+// contributors, MIT License. Homographies act on centred coordinates q = (p - centre) / (long edge / 2) of the oriented,
+// lens-corrected image and map lens-corrected -> transformed (rendering samples with the inverse). Row-major 3x3 arrays.
+const H3 = {
+  I: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+  mul: (A, B) => { const o = new Array(9); for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) o[r * 3 + c] = A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c]; return o; },
+  inv: A => { const [a, b, c, d, e, f, g, h, i] = A; const C = [e * i - f * h, -(b * i - c * h), b * f - c * e, -(d * i - f * g), a * i - c * g, -(a * f - c * d), d * h - e * g, -(a * h - b * g), a * e - b * d]; const det = a * C[0] + b * C[3] + c * C[6]; return C.map(v => v / det); },
+  ap: (H, x, y) => { const w = H[6] * x + H[7] * y + H[8]; return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w]; },
+  isI: H => !H || H.every((v, i) => Math.abs(v - H3.I[i]) < 1e-9),
+};
+const diag3 = (a, b, c) => [a, 0, 0, 0, b, 0, 0, 0, c];
+function recentreH(H) { // keep the centre fixed and preserve local area there
+  const o = H3.ap(H, 0, 0); const T = H3.mul([1, 0, -o[0], 0, 1, -o[1], 0, 0, 1], H);
+  const e = 1e-4, p0 = H3.ap(T, 0, 0), px = H3.ap(T, e, 0), py = H3.ap(T, 0, e);
+  const J = [(px[0] - p0[0]) / e, (py[0] - p0[0]) / e, (px[1] - p0[1]) / e, (py[1] - p0[1]) / e];
+  const s = 1 / Math.sqrt(Math.abs(J[0] * J[3] - J[1] * J[2])); return H3.mul(diag3(s, s, 1), T);
+}
+const rotHom = (R, f) => H3.mul(H3.mul(diag3(f, f, 1), R), diag3(1 / f, 1 / f, 1));
+const rotX3 = a => { const c = Math.cos(a), s = Math.sin(a); return [1, 0, 0, 0, c, -s, 0, s, c]; };
+const rotY3 = a => { const c = Math.cos(a), s = Math.sin(a); return [c, 0, s, 0, 1, 0, -s, 0, c]; };
+const TR_F = 1.5, TR_KMAX = 0.5;
+function manualH(tr) {
+  if (!tr) return H3.I; let H = H3.I; const v = tr.v || 0, h = tr.h || 0;
+  if (v || h) H = recentreH(rotHom(H3.mul(rotY3(h / 100 * TR_KMAX), rotX3(-v / 100 * TR_KMAX)), TR_F));
+  if (tr.rot) { const a = tr.rot * Math.PI / 180, c = Math.cos(a), s = Math.sin(a); H = H3.mul([c, -s, 0, s, c, 0, 0, 0, 1], H); }
+  if (tr.asp) { const k = Math.pow(2, tr.asp / 200); H = H3.mul(diag3(1 / k, k, 1), H); }
+  const sc = Math.max(0.1, Math.min(10, (tr.scale ?? 100) / 100)); if (sc !== 1) H = H3.mul(diag3(sc, sc, 1), H);
+  if (tr.ox || tr.oy) H = H3.mul([1, 0, (tr.ox || 0) / 100 * 0.5, 0, 1, -(tr.oy || 0) / 100 * 0.5, 0, 0, 1], H);
+  return H;
+}
+// Pixel-space homography (column-major, for mmul): transformed oriented px -> lens-corrected oriented px; null if identity.
+function perspPx(geo, Wr, Hr) {
+  const Ht = H3.mul(manualH(geo.tr), geo.upright || H3.I); if (H3.isI(Ht)) return null;
+  const L = Math.max(Wr, Hr) / 2, cx = Wr / 2, cy = Hr / 2;
+  const P = H3.mul(H3.mul([L, 0, cx, 0, L, cy, 0, 0, 1], H3.inv(Ht)), [1 / L, 0, -cx / L, 0, 1 / L, -cy / L, 0, 0, 1]);
+  return [P[0], P[3], P[6], P[1], P[4], P[7], P[2], P[5], P[8]];
+}
+
+// --- analysis image + line segments (CPU, ~1024 px) ---
+function uprightImage(im) {
+  const g0 = Object.assign({}, im.params.geo, { angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, tr: null, upright: null });
+  const G = geometry(g0, im.fullW, im.fullH, true); const U = uniformsFromParams(im.params, im); U.showMask = -1; U.clipWarn = 0;
+  const maxW = Math.round(1024 * G.outW / Math.max(G.outW, G.outH)); const { px, w, h } = renderer.readSmall(U, G, maxW, 'upright');
+  const v = new Float32Array(w * h); for (let i = 0; i < w * h; i++) v[i] = (0.2126 * px[i * 4] + 0.7152 * px[i * 4 + 1] + 0.0722 * px[i * 4 + 2]) / 255;
+  return { v, w, h };
+}
+function detectSegments(img) {
+  const { w, h } = img, n = w * h, v = new Float32Array(img.v); gauss3(v, w, h, 0.8);
+  const mag = new Float32Array(n), ang = new Float32Array(n), vals = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, a = v[i - w - 1], b = v[i - w], c = v[i - w + 1], d = v[i - 1], f = v[i + 1], g = v[i + w - 1], hh = v[i + w], k = v[i + w + 1];
+    const gx = (c + 2 * f + k) - (a + 2 * d + g), gy = (g + 2 * hh + k) - (a + 2 * b + c);
+    mag[i] = Math.hypot(gx, gy) / 8; let an = Math.atan2(gy, gx) + Math.PI / 2; an = ((an % Math.PI) + Math.PI) % Math.PI; ang[i] = an; if (mag[i] > 1e-4) vals.push(mag[i]);
+  }
+  if (vals.length < 32) return [];
+  vals.sort((p, q) => p - q); const thr = Math.max(0.35 * vals[Math.floor(vals.length * 0.9)], 0.008);
+  const seeds = []; for (let i = 0; i < n; i++) if (mag[i] > thr) seeds.push(i); seeds.sort((p, q) => mag[q] - mag[p]);
+  const used = new Uint8Array(n), segs = [], long = Math.max(w, h), L = long / 2, TOL = 22.5 * Math.PI / 180;
+  for (const s of seeds) {
+    if (used[s]) continue; used[s] = 1; const reg = [s]; let C2 = Math.cos(2 * ang[s]) * mag[s], S2 = Math.sin(2 * ang[s]) * mag[s];
+    for (let q = 0; q < reg.length; q++) {
+      const p = reg[q], x = p % w, y = (p - x) / w; const mean = 0.5 * Math.atan2(S2, C2);
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue; const xx = x + dx, yy = y + dy; if (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) continue;
+        const j = yy * w + xx; if (used[j] || mag[j] <= thr) continue;
+        let df = Math.abs(ang[j] - mean) % Math.PI; if (df > Math.PI / 2) df = Math.PI - df; if (df > TOL) continue;
+        used[j] = 1; reg.push(j); C2 += Math.cos(2 * ang[j]) * mag[j]; S2 += Math.sin(2 * ang[j]) * mag[j];
+      }
+    }
+    if (reg.length < 12) continue;
+    let W = 0, mx = 0, my = 0; for (const p of reg) { const x = p % w, y = (p - x) / w; W += mag[p]; mx += mag[p] * x; my += mag[p] * y; } mx /= W; my /= W;
+    let sxx = 0, syy = 0, sxy = 0; for (const p of reg) { const x = p % w - mx, y = (p - (p % w)) / w - my; sxx += mag[p] * x * x; syy += mag[p] * y * y; sxy += mag[p] * x * y; }
+    const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th); let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+    for (const p of reg) { const x = p % w - mx, y = (p - (p % w)) / w - my, along = x * ux + y * uy, across = -x * uy + y * ux; a0 = Math.min(a0, along); a1 = Math.max(a1, along); b0 = Math.min(b0, across); b1 = Math.max(b1, across); }
+    const len = a1 - a0, wid = b1 - b0; if (len < 0.04 * long || len / Math.max(wid, 1) < 5) continue;
+    const P0 = [(mx + a0 * ux + 0.5 - w / 2) / L, (my + a0 * uy + 0.5 - h / 2) / L], P1 = [(mx + a1 * ux + 0.5 - w / 2) / L, (my + a1 * uy + 0.5 - h / 2) / L];
+    const lh = [P0[1] - P1[1], P1[0] - P0[0], P0[0] * P1[1] - P1[0] * P0[1]], nn = Math.hypot(lh[0], lh[1]);
+    const dx = P1[0] - P0[0], dy = P1[1] - P0[1], sl = Math.hypot(dx, dy);
+    segs.push({ p0: P0, p1: P1, m: [(P0[0] + P1[0]) / 2, (P0[1] + P1[1]) / 2], d: [dx / sl, dy / sl], len: sl, l: lh.map(t => t / nn), tilt: Math.acos(Math.min(1, Math.abs(dy) / sl)) * 180 / Math.PI });
+  }
+  return segs;
+}
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = a => { const n = Math.hypot(a[0], a[1], a[2]) || 1; return a.map(t => t / n); };
+function vpErr(s, v) { // degrees between the segment and the direction from its midpoint to the vanishing point
+  let dx, dy; if (Math.abs(v[2]) > 1e-9) { dx = v[0] / v[2] - s.m[0]; dy = v[1] / v[2] - s.m[1]; } else { dx = v[0]; dy = v[1]; }
+  const n = Math.hypot(dx, dy); if (n < 1e-12) return 90; return Math.acos(Math.min(1, Math.abs((dx * s.d[0] + dy * s.d[1]) / n))) * 180 / Math.PI;
+}
+function smallestEigvec3(A) { // Jacobi on a symmetric 3x3
+  const a = [[A[0], A[1], A[2]], [A[3], A[4], A[5]], [A[6], A[7], A[8]]], V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let it = 0; it < 50; it++) {
+    let p = 0, q = 1; if (Math.abs(a[0][2]) > Math.abs(a[p][q])) { p = 0; q = 2; } if (Math.abs(a[1][2]) > Math.abs(a[p][q])) { p = 1; q = 2; }
+    if (Math.abs(a[p][q]) < 1e-14) break; const th = 0.5 * Math.atan2(2 * a[p][q], a[q][q] - a[p][p]), c = Math.cos(th), s = Math.sin(th);
+    for (let k = 0; k < 3; k++) { const akp = a[k][p], akq = a[k][q]; a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq; }
+    for (let k = 0; k < 3; k++) { const apk = a[p][k], aqk = a[q][k]; a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk; }
+    for (let k = 0; k < 3; k++) { const vkp = V[k][p], vkq = V[k][q]; V[k][p] = c * vkp - s * vkq; V[k][q] = s * vkp + c * vkq; }
+  }
+  let m = 0; for (let i = 1; i < 3; i++) if (a[i][i] < a[m][m]) m = i; return [V[0][m], V[1][m], V[2][m]];
+}
+function findVP(fam, vertical) {
+  const top = fam.slice().sort((a, b) => b.len - a.len).slice(0, 60); if (top.length < 2) return null;
+  let best = null, bs = 0;
+  for (let i = 0; i < top.length; i++) for (let j = i + 1; j < top.length; j++) {
+    const v = norm3(cross3(top[i].l, top[j].l)); let sc = 0; for (const s of fam) if (vpErr(s, v) < 1.5) sc += s.len; if (sc > bs) { bs = sc; best = v; }
+  }
+  if (!best) return null; const inl = fam.filter(s => vpErr(s, best) < 3); if (inl.length < 2) return null;
+  const A = new Array(9).fill(0); for (const s of inl) for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) A[r * 3 + c] += s.len * s.l[r] * s.l[c];
+  const v = smallestEigvec3(A); const inl2 = fam.filter(s => vpErr(s, v) < 3); const famLen = fam.reduce((a, s) => a + s.len, 0), inLen = inl2.reduce((a, s) => a + s.len, 0);
+  const ms = inl2.map(s => vertical ? s.m[0] : s.m[1]); const spread = ms.length ? Math.max(...ms) - Math.min(...ms) : 0;
+  const finiteNear = Math.abs(v[2]) > 1e-9 && Math.abs(v[0] / v[2]) < 2 && Math.abs(v[1] / v[2]) < 2;
+  const reliable = inl2.length >= 3 && inLen >= 0.5 && spread >= 0.4 && inLen >= 0.6 * famLen && !finiteNear;
+  return { v, reliable, inliers: inl2 };
+}
+function rotBetween(a, b) { // Rodrigues: minimal rotation taking unit a onto unit b
+  const k = cross3(a, b), s = Math.hypot(k[0], k[1], k[2]), c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; if (s < 1e-12) return H3.I.slice();
+  const K = [0, -k[2], k[1], k[2], 0, -k[0], -k[1], k[0], 0], K2 = H3.mul(K, K), f = (1 - c) / (s * s);
+  return H3.I.map((v, i) => v + K[i] + K2[i] * f);
+}
+const rotAngleDeg = R => Math.acos(Math.max(-1, Math.min(1, (R[0] + R[4] + R[8] - 1) / 2))) * 180 / Math.PI;
+const vdir = (v, f) => norm3([v[0] / f, v[1] / f, v[2]]);
+function levelAngle(segs, maxDev = 45, minLines = 2) { // length-weighted median deviation, with a consensus test
+  const hz = segs.filter(s => s.tilt > 60), vt = segs.filter(s => s.tilt < 30), sl = a => a.reduce((t, s) => t + s.len, 0);
+  const useH = sl(hz) >= 0.5 * sl(vt), fam = useH ? hz : vt; if (fam.length < minLines) return null;
+  const dev = fam.map(s => { let d = useH ? Math.atan2(s.d[1], s.d[0]) * 180 / Math.PI : -Math.atan2(s.d[0], s.d[1]) * 180 / Math.PI; while (d > 90) d -= 180; while (d <= -90) d += 180; return { d, len: s.len }; }).filter(o => Math.abs(o.d) <= maxDev);
+  if (dev.length < minLines) return null; dev.sort((a, b) => a.d - b.d); const tot = sl(dev); let acc = 0, med = dev[0].d; for (const o of dev) { acc += o.len; if (acc >= tot / 2) { med = o.d; break; } }
+  const agree = dev.filter(o => Math.abs(o.d - med) <= 2).reduce((t, o) => t + o.len, 0); if (agree < 0.5 * tot) return null; return -med;
+}
+const rotH = deg => { const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+function solveUpright(segs, mode) {
+  const vt = segs.filter(s => s.tilt < 30), hz = segs.filter(s => s.tilt > 60);
+  const V = findVP(vt, true), Hh = findVP(hz, false);
+  const vertical = () => { if (!V || !V.reliable) return null; let d = vdir(V.v, TR_F); if (d[1] < 0) d = d.map(t => -t); const R = rotBetween(d, [0, 1, 0]); return { H: recentreH(rotHom(R, TR_F)), ang: rotAngleDeg(R) }; };
+  const full = () => {
+    if (!V || !V.reliable || !Hh || !Hh.reliable) return null; const v = V.v, h = Hh.v; let f = TR_F;
+    if (Math.abs(v[2]) > 0.02 && Math.abs(h[2]) > 0.02) { const f2 = -((v[0] / v[2]) * (h[0] / h[2]) + (v[1] / v[2]) * (h[1] / h[2])); if (f2 > 0 && Math.sqrt(f2) >= 0.5 && Math.sqrt(f2) <= 6) f = Math.sqrt(f2); }
+    let dv = vdir(v, f); if (dv[1] < 0) dv = dv.map(t => -t); let dh = vdir(h, f); if (dh[0] < 0) dh = dh.map(t => -t);
+    const k = dh[0] * dv[0] + dh[1] * dv[1] + dh[2] * dv[2], r1 = norm3([dh[0] - k * dv[0], dh[1] - k * dv[1], dh[2] - k * dv[2]]), r3 = cross3(r1, dv);
+    const R = [...r1, ...dv, ...r3]; return { H: recentreH(rotHom(R, f)), ang: rotAngleDeg(R) };
+  };
+  const level = () => { const a = levelAngle(segs); return a == null ? null : { H: rotH(a), ang: Math.abs(a), deg: a }; };
+  if (mode === 'level') return level(); if (mode === 'vertical') return vertical() || level(); if (mode === 'full') return full() || vertical() || level();
+  if (mode === 'auto') { const f = full(); if (f && f.ang < 20) return f; const v = vertical(); if (v && v.ang < 25) return v; const l = level(); if (l && Math.abs(l.deg) <= 5) return l; return null; }
+  return null;
+}
+function computeUpright(mode) {
+  const im = CUR(); if (!im || !renderer.src) return; const g = im.params.geo;
+  if (mode === 'off') { g.upright = null; g.uprightMode = 'off'; refreshAll(); fitView(); commit(); return; }
+  const t0 = performance.now(); const segs = detectSegments(uprightImage(im)); const r = solveUpright(segs, mode);
+  if (!r) { toast('找不到足夠可靠的直線，這張照片不適合自動校正'); return; }
+  g.upright = r.H; g.uprightMode = mode; if (g.constrain === undefined) g.constrain = true; refreshAll(); fitView(); commit();
+  toast(`Upright：已校正（偵測到 ${segs.length} 條線，${Math.round(performance.now() - t0)} ms）`);
+}
+// Auto straighten: plumb lines, then long lines, then a horizon search; result is the crop angle (max 5 degrees).
+function horizonAngle(img) {
+  const { w, h } = img, v = new Float32Array(img.v); gauss3(v, w, h, 1.5); const k = 4; if (w < 32 || h < 4 * k + 8) return null;
+  const cols = []; for (let x = 0; x < w; x += 4) cols.push(x);
+  const P = new Float32Array((h + 1) * cols.length); cols.forEach((x, ci) => { let s = 0; for (let y = 0; y < h; y++) { P[ci * (h + 1) + y] = s; s += v[y * w + x]; } P[ci * (h + 1) + h] = s; });
+  const diff = (ci, y) => { const o = ci * (h + 1); return ((P[o + y] - P[o + y - k]) - (P[o + y + k] - P[o + y])) / k; };
+  const all = []; for (let ci = 0; ci < cols.length; ci += 2) for (let y = k; y < h - k; y += 2) { const d = Math.abs(diff(ci, y)); if (d > 0) all.push(d); }
+  if (all.length < 100) return null; all.sort((a, b) => a - b); const norm = Math.max(all[Math.floor(all.length * 0.99)], 1e-4);
+  const y0 = Math.max(Math.ceil(0.05 * h), k), y1 = Math.min(Math.floor(0.95 * h), h - k), buf = new Float32Array(cols.length);
+  const score = (tn, b, sg) => { let n = 0; for (let ci = 0; ci < cols.length; ci++) { const y = Math.round(b + tn * (cols[ci] - w / 2)); if (y < y0 || y >= y1) continue; buf[n++] = sg * diff(ci, y); } if (n * 5 < cols.length * 4) return -Infinity; const a = buf.subarray(0, n).sort(); return a[Math.floor(n * 0.3)]; };
+  let best = -Infinity, bd = 0, bb = 0, bsg = 1;
+  for (const sg of [1, -1]) for (let deg = -10; deg <= 10; deg += 0.25) { const tn = Math.tan(deg * Math.PI / 180); for (let b = y0; b < y1; b += 4) { const s = score(tn, b, sg); if (s > best) { best = s; bd = deg; bb = b; bsg = sg; } } }
+  for (let deg = bd - 0.3; deg <= bd + 0.3; deg += 0.02) { const tn = Math.tan(deg * Math.PI / 180); for (let b = bb - 3; b <= bb + 3; b += 0.5) { const s = score(tn, b, bsg); if (s > best) { best = s; bd = deg; bb = b; } } }
+  return best / norm >= 0.3 && Math.abs(bd) <= 5 ? -bd : null;
+}
+function autoStraighten() {
+  const im = CUR(); if (!im || !renderer.src) return; const img = uprightImage(im), segs = detectSegments(img);
+  let roll = null; const vt = segs.filter(s => s.tilt < 20);
+  if (vt.length >= 8) { const V = findVP(vt, true); if (V) { const inl = vt.filter(s => vpErr(s, V.v) < 2), tl = inl.reduce((a, s) => a + s.len, 0), xs = inl.map(s => s.m[0]);
+    const finiteNear = Math.abs(V.v[2]) > 1e-9 && Math.abs(V.v[0] / V.v[2]) < 2 && Math.abs(V.v[1] / V.v[2]) < 2;
+    if (inl.length >= 8 && tl >= 1.5 && xs.length && Math.max(...xs) - Math.min(...xs) >= 0.6 && !finiteNear) { let d = V.v[1] < 0 ? V.v.map(t => -t) : V.v; let r = Math.atan2(d[0], d[1]) * 180 / Math.PI; while (r > 90) r -= 180; while (r <= -90) r += 180; if (Math.abs(r) <= 5) roll = r; } } }
+  let ang = roll;
+  if (ang == null) { const l = levelAngle(segs, 10, 3), hz = horizonAngle(img); if (hz != null && l != null) ang = Math.abs(hz - l) <= 1 ? hz : null; else if (hz != null) ang = hz; else if (l != null && Math.abs(l) <= 5) ang = l; }
+  if (ang == null) { toast('找不到可以拉直的水平線或垂直線'); return; }
+  im.params.geo.angle = Math.round(-ang * 10) / 10 || 0; refreshAll(); fitView(); commit(); toast(`已自動拉直 ${im.params.geo.angle.toFixed(1)}°`);
+}
+
 // ---------- film emulation LUTs ----------
 // FILM_LUTS (filmluts.js): { size, list:[{id,name,d,...}], data: base64(zlib(all LUTs, size^3*3 bytes each, red fastest)) }
 const FILM_LIST = (typeof FILM_LUTS !== 'undefined' && FILM_LUTS.list) || [];
@@ -1318,7 +1517,7 @@ function onCurveChange() { const im = CUR(); if (!im) return; im.params.curves =
 
 // ---------- local masks: coordinates, overlay, interaction ----------
 // Mask geometry is stored in "iso" units: lens-corrected full-image pixels divided by the long edge.
-function invMap(m, x, y) { const a = m[0], b = m[1], c = m[3], d = m[4], X = x - m[6], Y = y - m[7], det = a * d - b * c; return [(d * X - c * Y) / det, (-b * X + a * Y) / det]; }
+function invMap(m, x, y) { if (m[2] || m[5] || m[8] !== 1) { const R = H3.inv([m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]); return H3.ap(R, x, y); } const a = m[0], b = m[1], c = m[3], d = m[4], X = x - m[6], Y = y - m[7], det = a * d - b * c; return [(d * X - c * Y) / det, (-b * X + a * Y) / det]; }
 function isoToCanvas(ix, iy) { const im = CUR(); const Lm = Math.max(im.fullW, im.fullH); const G = currentGeometry(); const o = invMap(G.m, ix * Lm, iy * Lm); return frameToScreen(o[0], o[1]); }
 function canvasToIso(sx, sy) { const im = CUR(); const Lm = Math.max(im.fullW, im.fullH); const G = currentGeometry(); const f = screenToFrame(sx, sy); const p = mapPt(G.m, f[0], f[1]); return [p[0] / Lm, p[1] / Lm]; }
 function maskHandles(m) {
@@ -1747,7 +1946,7 @@ async function exportImage(im, o, prog) {
   const fullW = src.w * src.scale, fullH = src.h * src.scale;
   const G = geometry(params.geo, fullW, fullH);
   let outW = G.outW, outH = G.outH, m = G.m;
-  if (isFinite(target) && Math.max(outW, outH) > target) { const s = Math.max(outW, outH) / target; outW = Math.round(outW / s); outH = Math.round(outH / s); m = [m[0] * s, m[1] * s, m[2], m[3] * s, m[4] * s, m[5], m[6], m[7], m[8]]; }
+  if (isFinite(target) && Math.max(outW, outH) > target) { const s = Math.max(outW, outH) / target; outW = Math.round(outW / s); outH = Math.round(outH / s); m = [m[0] * s, m[1] * s, m[2] * s, m[3] * s, m[4] * s, m[5] * s, m[6], m[7], m[8]]; }
   const meta = im.meta || {}; const dt = meta.timestamp ? new Date(meta.timestamp * 1000) : new Date();
   const pad = n => String(n).padStart(2, '0'); const dts = `${dt.getFullYear()}:${pad(dt.getMonth() + 1)}:${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
   const exif = o.wantExif ? { make: meta.make, model: meta.model, software: 'RAW Editor (LibRaw)', dateTime: dts, exposure: meta.shutter, fnumber: meta.aperture, iso: meta.iso, focal: meta.focal, lens: meta.lens } : null;
@@ -1767,7 +1966,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {

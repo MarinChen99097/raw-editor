@@ -190,7 +190,7 @@ float invSmooth(float x){ return 0.5 - sin(asin(1.0 - 2.0*clamp(x,0.0,1.0))/3.0)
 
 void main(){
   vec2 outPx = v_uv*u_outSize;
-  vec2 fullPx = (u_m*vec3(outPx,1.0)).xy;       // lens-corrected full-image coords (masks live here)
+  vec3 fullH = u_m*vec3(outPx,1.0); vec2 fullPx = fullH.xy/fullH.z;       // lens-corrected full-image coords (masks live here)
 
   // --- local adjustment masks: positional weights ---
   float lSharp = 0.0, lTex = 0.0, lNR = 0.0;

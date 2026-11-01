@@ -208,7 +208,7 @@ class Renderer {
     if (!R || R.w !== w || R.h !== h) { this._del(R); R = this[into] = this._fbTex(w, h, true); }
     // m maps out px -> full-image px; adjust for the render scale
     const s = G.outW / w; const m = G.m.slice(); // column-major mat3
-    const ms = [m[0] * s, m[1] * s, m[2], m[3] * s, m[4] * s, m[5], m[6], m[7], m[8]];
+    const ms = [m[0] * s, m[1] * s, m[2] * s, m[3] * s, m[4] * s, m[5] * s, m[6], m[7], m[8]];
     gl.bindVertexArray(this.vao);
     this._setMainUniforms(U, src, w, h, ms);
     gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb); gl.viewport(0, 0, w, h); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -269,7 +269,7 @@ class Renderer {
           // sample the tile border (several points per edge, since lens distortion bends straight edges)
           const border = []; const K = U.lensOn ? 8 : 1;
           for (let i = 0; i <= K; i++) { const t = i / K; border.push([ox + ow * t, oy], [ox + ow * t, oy + oh], [ox, oy + oh * t], [ox + ow, oy + oh * t]); }
-          let pts = border.map(([x, y]) => [m[0] * x + m[3] * y + m[6], m[1] * x + m[4] * y + m[7]]);
+          let pts = border.map(([x, y]) => { const w = m[2] * x + m[5] * y + m[8]; return [(m[0] * x + m[3] * y + m[6]) / w, (m[1] * x + m[4] * y + m[7]) / w]; });
           if (U.lensOn) pts = pts.flatMap(p => lensSourcePts(U.lens, p[0], p[1], fullW, fullH));
           const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); const MG = MARGIN + lensMargin;
           let sx0 = Math.floor(Math.min(...xs) / src.scale) - MG, sy0 = Math.floor(Math.min(...ys) / src.scale) - MG;
@@ -287,7 +287,7 @@ class Renderer {
           gl.bindTexture(gl.TEXTURE_2D, tileTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, sw, sh, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, region);
           // the shader clamps fetches to u_srcSize; pass the region size (texture may be larger)
           const s = { tex: tileTex, w: sw, h: sh, scale: src.scale, fullW, fullH, originX: sx0 * src.scale, originY: sy0 * src.scale };
-          const mt = [m[0], m[1], 0, m[3], m[4], 0, m[0] * ox + m[3] * oy + m[6], m[1] * ox + m[4] * oy + m[7], 1];
+          const mt = [m[0], m[1], m[2], m[3], m[4], m[5], m[0] * ox + m[3] * oy + m[6], m[1] * ox + m[4] * oy + m[7], m[2] * ox + m[5] * oy + m[8]]; // keeps the projective row (perspective)
           gl.bindVertexArray(this.vao); this._setMainUniforms(U, s, ow, oh, mt);
           gl.bindFramebuffer(gl.FRAMEBUFFER, out.fb); gl.viewport(0, 0, ow, oh);
           if (!b16) {

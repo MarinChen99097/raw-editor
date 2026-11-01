@@ -15,7 +15,9 @@ const DEFAULTS = ({
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
   clarity: 0, dehaze: 0, texture: 0, fade: 0, vignette: 0, vigMid: 50, vigFeather: 50, grain: 0, grainSize: 25,
   sharpen: 25, sharpenRadius: 1, nrLum: 0, nrColor: 15,
-  geo: { rot: 0, flipH: false, flipV: false, angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, aspect: 'free' },
+  geo: { rot: 0, flipH: false, flipV: false, angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, aspect: 'free',
+    // perspective transform (vertical, horizontal, rotate, aspect, scale %, offset), Upright homography (row-major 3x3) and Constrain Crop
+    tr: { v: 0, h: 0, rot: 0, asp: 0, scale: 100, ox: 0, oy: 0 }, upright: null, uprightMode: 'off', constrain: true },
   // lens correction: auto = use the camera's embedded profile (Sony / Fujifilm / DNG); amounts in %
   lens: { auto: true, dist: 100, vig: 100, ca: true, manDist: 0, manVig: 0, caR: 0, caB: 0, defringe: 0 },
   // film emulation LUT (see filmluts.js): id '' = none, amount in %
