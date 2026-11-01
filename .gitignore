@@ -5,3 +5,4 @@ node_modules/
 預設集總覽.jpg
 tools/lut_src/
 新增風格總覽.jpg
+__pycache__/
