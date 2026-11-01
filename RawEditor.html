@@ -2714,7 +2714,9 @@ function lookResidual(o, t, aligned) {
   const r = o.q.map((v, i) => (v - t.q[i]) * 100); r.push(clipResidual(o, t));
   if (!aligned) { r.push((o.a - t.a) * 250, (o.b - t.b) * 250, (o.c - t.c) * 250); return r; }
   const g = o.grid, h = t.grid, w = 250 / Math.sqrt(g.length / 4), wL = 100 / Math.sqrt(g.length / 4), sw = t.sw;
-  for (let k = 0; k < g.length; k += 4) { const e = sw ? sw[k / 4] : 1; r.push((g[k] - h[k]) * wL * e, (g[k + 1] - h[k + 1]) * w * e, (g[k + 2] - h[k + 2]) * w * e); }
+  // lightness cell by cell only counts fully in the JPEG's mid-tones: in deep shadows the camera's own local lifting
+  // (Active D-Lighting, DRO) would otherwise be read as lens vignetting and pull the corner correction up
+  for (let k = 0; k < g.length; k += 4) { const e = sw ? sw[k / 4] : 1, m = h[k] > 0.35 && h[k] < 0.88 ? 1 : 0.25; r.push((g[k] - h[k]) * wL * e * m, (g[k + 1] - h[k + 1]) * w * e, (g[k + 2] - h[k + 2]) * w * e); }
   return r;
 }
 function gridCorrL(a, b) { // Pearson correlation of the lightness grids (tone-independent alignment check)
@@ -2828,7 +2830,7 @@ async function fitCameraLook(im, src, isStale = () => false) {
     const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
     target.sw = skinWeights(target.grid);
     const info = { corr: +best.toFixed(3), aligned, bands: [] }; fitCameraLook.last = info;
-    if (aligned) K1 = [...LOOK_KEYS, ['lens.manVig', -100, 100, 8, 40]];
+    if (aligned) K1 = [...LOOK_KEYS, ['lens.manVig', -30, 50, 8, 20]];
     const th1 = await lmFit(K1, th => lookResidual(statsFor(with1(th)), target, aligned), isStale, 7, t0 + 6000);
     if (!th1) return null;
     const vals = {}; K1.forEach(([k], i) => { const v = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]); if (k === 'lens.manVig') vals.lens = { manVig: v }; else vals[k] = v; });
@@ -2843,12 +2845,14 @@ async function fitCameraLook(im, src, isStale = () => false) {
     }
     const bands = act.map((v, i) => v >= 0.01 ? i : -1).filter(i => i >= 0); info.bands = bands;
     if (!bands.length) return vals;
-    const hp = 20, K2 = []; for (const i of bands) K2.push([`h.${i}`, -50, 50, 8, hp], [`s.${i}`, -60, 100, 8, hp], [`l.${i}`, -50, 50, 8, hp]);
+    // hue and saturation only, kept moderate: lightness stays with the tone sliders (an HSL lightness fit would darken blues
+    // and greens to make up for tone differences elsewhere, turning a light blue dress into a deep blue one)
+    const hp = 15, K2 = []; for (const i of bands) K2.push([`h.${i}`, -25, 25, 6, hp], [`s.${i}`, -40, 40, 6, hp]);
     const with2 = th => { const p = Object.assign({}, p1, { hsl: zeroHSL() }); K2.forEach(([q], i) => { const [c, b] = q.split('.'); p.hsl[c][+b] = th[i]; }); return p; };
-    const wL = 100 / Math.sqrt(cells), wab = 250 / Math.sqrt(cells);
+    const wab = 250 / Math.sqrt(cells);
     const res2 = o => {
       const r = o.q.map((v, i) => (v - target.q[i]) * 100), g = o.grid, t = target.grid; r.push(clipResidual(o, target));
-      for (let k = 0; k < g.length; k += 4) { const e = target.sw[k / 4]; r.push((g[k] - t[k]) * wL * e, (g[k + 1] - t[k + 1]) * wab * e, (g[k + 2] - t[k + 2]) * wab * e); }
+      for (let k = 0; k < g.length; k += 4) { const e = target.sw[k / 4]; r.push((g[k + 1] - t[k + 1]) * wab * e, (g[k + 2] - t[k + 2]) * wab * e); }
       return r;
     };
     const th2 = await lmFit(K2, th => res2(statsFor(with2(th))), isStale, 2, t0 + 9000);
