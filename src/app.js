@@ -301,8 +301,9 @@ function sliderTarget(path) {
   if (path.startsWith('S.')) { const s = CUR() && (CUR().params.spots || [])[healUI.sel]; return [s ? Object.assign({ size: 25 }, s) : null, path.slice(2), SPOT_DEFAULTS]; }
   return [CUR() ? CUR().params : null, path, defaultsFor(CUR())];
 }
+let lastScrollT = 0; document.addEventListener('scroll', () => { lastScrollT = Date.now(); }, { capture: true, passive: true }); // any panel scroll (sliders ignore the tap that stops it)
 function makeSlider(path, label, min, max, step, format, grad) {
-  // design-system slider: bipolar fill from 0 with a tick, relative drag near the knob (jump when pressed far away),
+  // design-system slider: bipolar fill from 0 with a tick, relative drag (mouse: jump when pressed far from the knob),
   // double tap resets, tap the value to type it, keyboard (arrows, Shift = x10, Home/End, Backspace = reset), modified value in amber
   const [, sub0, defs] = sliderTarget(path); const def = getPath(defs, sub0);
   const root = el('div', { class: 'sl' + (grad ? ' colorful' : ''), style: grad ? `--grad:${grad}` : '', role: 'slider', tabindex: '0', 'aria-label': label, 'aria-valuemin': String(min), 'aria-valuemax': String(max) });
@@ -318,24 +319,43 @@ function makeSlider(path, label, min, max, step, format, grad) {
     root.setAttribute('aria-valuenow', String(v)); root.setAttribute('aria-valuetext', format(v));
   };
   const put = (v, commitNow) => { v = clamp(Math.round(v / step) * step, min, max); setParam(path, +v.toFixed(4), commitNow); };
-  let dragging = false, startX = 0, startV = 0, moved = false, lastTap = 0, prevSide = 0;
+  // touch: nothing changes until the finger clearly moves sideways; a vertical move is left to the panel (touch-action: pan-y),
+  // a single tap never changes the value (it is often just stopping a scroll). Mouse: press far from the knob jumps there.
+  let drag = null, lastTap = null, lastClickT = 0, prevSide = 0;
   const side = v => Math.sign(Math.round((v - def) / step));
   const setFromClient = cx => { const r = track.getBoundingClientRect(); put(min + clamp((cx - r.left) / r.width, 0, 1) * (max - min), false); };
+  const begin = e => { drag.on = true; drag.v = cur(); prevSide = side(drag.v); try { track.setPointerCapture(e.pointerId); } catch { } root.classList.add('dragging'); };
   track.addEventListener('pointerdown', e => {
-    const [obj] = sliderTarget(path); if (!CUR() || !obj) return; e.preventDefault(); try { track.setPointerCapture(e.pointerId); } catch { }
-    dragging = true; moved = false; startX = e.clientX; startV = cur(); prevSide = side(startV);
-    const now = Date.now(); if (now - lastTap < 320) { setParam(path, def, true); dragging = false; lastTap = 0; return; } lastTap = now;
-    const r = track.getBoundingClientRect(), kx = r.left + (startV - min) / (max - min) * r.width;
-    if (Math.abs(e.clientX - kx) > 16) { setFromClient(e.clientX); startV = cur(); startX = e.clientX; moved = true; } // far from the knob: jump there, then drag relatively
-    root.classList.add('dragging');
+    const [obj] = sliderTarget(path); if (!CUR() || !obj || drag) return;
+    drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: Date.now(), mouse: e.pointerType === 'mouse', on: false };
+    if (!drag.mouse) return;
+    e.preventDefault();
+    const now = Date.now(); if (now - lastClickT < 320) { lastClickT = 0; drag = null; setParam(path, def, true); return; } lastClickT = now; // double click resets
+    const r = track.getBoundingClientRect(), kx = r.left + (cur() - min) / (max - min) * r.width;
+    if (Math.abs(e.clientX - kx) > 16) setFromClient(e.clientX); // far from the knob: jump there, then drag relatively
+    begin(e);
   });
   track.addEventListener('pointermove', e => {
-    if (!dragging) return; const dx = e.clientX - startX; if (Math.abs(dx) > 2) moved = true; if (!moved) return;
-    const r = track.getBoundingClientRect(); const fine = e.shiftKey ? 0.25 : 1; put(startV + dx / r.width * (max - min) * fine, false);
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+    if (!drag.on) {
+      if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(dx)) { drag = null; return; } // scrolling the panel
+      if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 2) return;
+      begin(e);
+    }
+    const r = track.getBoundingClientRect(); const fine = e.shiftKey ? 0.25 : 1; put(drag.v + dx / r.width * (max - min) * fine, false);
     const sd = side(cur()); if (sd !== prevSide && navigator.vibrate) { try { navigator.vibrate(8); } catch { } } prevSide = sd; // light tick when crossing the default (Android)
   });
-  const up = () => { if (!dragging) return; dragging = false; root.classList.remove('dragging'); commit(); };
-  track.addEventListener('pointerup', up); track.addEventListener('pointercancel', up);
+  track.addEventListener('touchmove', e => { if (drag && drag.on) e.preventDefault(); }, { passive: false }); // once dragging, the panel must not start scrolling (iOS)
+  const end = (e, cancelled) => {
+    if (!drag || e.pointerId !== drag.id) return; const d = drag; drag = null;
+    if (d.on) { root.classList.remove('dragging'); commit(); return; }
+    if (cancelled || d.mouse) return;
+    // two quick taps on the same spot reset; ignored right after the panel scrolled (that tap only stops the scroll)
+    const now = Date.now(); if (now - d.t0 > 300 || Math.hypot(e.clientX - d.x0, e.clientY - d.y0) > 10 || now - lastScrollT < 400) { lastTap = null; return; }
+    if (lastTap && now - lastTap.t < 350 && Math.abs(e.clientX - lastTap.x) < 30) { lastTap = null; setParam(path, def, true); } else lastTap = { t: now, x: e.clientX };
+  };
+  track.addEventListener('pointerup', e => end(e, false)); track.addEventListener('pointercancel', e => end(e, true));
   lbl.addEventListener('dblclick', () => setParam(path, def, true));
   root.addEventListener('keydown', e => {
     if (e.target !== root) return; const k = e.key, m = e.shiftKey ? 10 : 1, v = cur();
