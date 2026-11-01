@@ -29,6 +29,7 @@ button:disabled { opacity: .4; cursor: default; }
 #status.on { display: block; }
 #histo { position: absolute; right: 8px; top: 8px; width: 160px; height: 70px; background: rgba(15,15,18,.7); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
 #histo.clip { border-color: #ff5a5a; }
+.profchips { margin: 2px 0 6px; }
 .wbbar { align-items: center; } .wbbar .hint { margin: 0 4px 0 0; }
 .histlist { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 8px; max-height: 260px; overflow: auto; }
 .histlist button { text-align: left; font-size: 12.5px; padding: 6px 8px; display: flex; justify-content: space-between; gap: 8px; }

@@ -96,6 +96,7 @@ uniform vec2  u_vig2;           // vignette roundness (-1..1), highlight priorit
 uniform float u_grainRough;     // grain roughness 0..1
 uniform float u_sharpMask;      // sharpening edge mask 0..1
 uniform int   u_clipWarn;       // show clipped highlights (red) and shadows (blue)
+uniform int   u_baseTone;       // 1: scene-referred RAW base tone map (LightCraft 'Color' rendering), 0: linear
 uniform vec2  u_outSize;
 uniform mat3  u_m;              // out pixel -> full-image pixel (lens-corrected space)
 uniform float u_exposure;       // linear multiplier
@@ -287,6 +288,19 @@ void main(){
     c = max(c, 0.0);
   }
 
+  // --- base tone map for RAW (from LightCraft, MIT): extended Reinhard on luminance, white point 2.9 EV over middle grey,
+  // ratio preserving, then highlight desaturation above 1. Gives a soft film-like shoulder instead of hard clipping. ---
+  if(u_baseTone == 1){
+    float Yb = dot(c, LUMA);
+    if(Yb > 1e-9){
+      const float wl = 1.3435669; // 0.18 * 2^2.9
+      float y = 0.18*exp2(log2(Yb/0.18)*1.12)*(1.0 + 0.18/wl); // slope 1.12 around middle grey (LightCraft contrast +22), a little Adobe-Color-like punch
+      float o = min(y*(1.0 + y/(wl*wl))/(1.0 + y), 1.0);
+      c *= o/Yb;
+      float mx = max(c.r, max(c.g, c.b));
+      if(mx > 1.0){ float t = clamp((mx - 1.0)/max(mx - o, 1e-6), 0.0, 1.0); c += (vec3(o) - c)*t; }
+    } else c = vec3(0.0);
+  }
   // --- tone (perceptual luminance domain, ratio preserving) ---
   float L = max(dot(c,LUMA), 1e-6);
   float Lp = enc(L);

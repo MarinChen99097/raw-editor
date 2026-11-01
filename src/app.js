@@ -168,10 +168,52 @@ function packMasks(U, masks) {
   }
 }
 
+// ---------- profiles (from LightCraft's built-in profiles, MIT) ----------
+// A profile is a set of slider deltas added under the user's sliders (the sliders keep showing the user's own values),
+// scaled by the profile amount. 'color' is the plain base rendering; 'flat' also turns off the RAW base tone map.
+// Deltas are LightCraft's numbers converted to this editor's slider scale (highlights/whites/blacks x0.6, shadows x0.8).
+const PROFILE_LIST = [['color', '色彩'], ['neutral', '中性'], ['vivid', '鮮豔'], ['landscape', '風景'], ['portrait', '人像'], ['mono', '單色'], ['flat', '平淡']];
+const PROFILES = {
+  neutral: { contrast: -18, saturation: -10, highlights: -6, shadows: 6 },
+  vivid: { contrast: 16, saturation: 14, vibrance: 14, blacks: -4 },
+  landscape: { contrast: 10, vibrance: 10, clarity: 6, hsl: { s: [0, 0, 0, 14, 10, 14, 0, 0], l: [0, 0, 0, 0, 0, -6, 0, 0] } },
+  portrait: { contrast: -6, texture: -6, hsl: { s: [-5, -8, 0, 0, 0, 0, 0, 0], l: [0, 6, 0, 0, 0, 0, 0, 0] } },
+  mono: { bw: true, contrast: 8 },
+};
+let profileUI = {};
+function profileParams(p) {
+  const d = PROFILES[p.profile]; if (!d) return p;
+  const k = Math.max(0, Math.min(2, (p.profileAmt ?? 100) / 100)); if (!k) return p;
+  const q = Object.assign({}, p), cl = v => Math.max(-100, Math.min(100, v));
+  for (const [key, v] of Object.entries(d)) {
+    if (key === 'bw') q.bw = true;
+    else if (key === 'hsl') { q.hsl = { h: p.hsl.h.slice(), s: p.hsl.s.slice(), l: p.hsl.l.slice() }; for (const c of ['h', 's', 'l']) if (v[c]) q.hsl[c] = q.hsl[c].map((x, i) => cl(x + v[c][i] * k)); }
+    else q[key] = cl((p[key] || 0) + v * k);
+  }
+  return q;
+}
+function refreshProfileUI() {
+  const im = CUR(); if (!profileUI.chips) return; const cur = im ? (im.params.profile || 'color') : 'color';
+  [...profileUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.p === cur));
+}
+// Auto tone (LightCraft's recipe, fitted to Lightroom on raw files): exposure from the mean log luminance of the white-balanced
+// source, plus a fixed recovery recipe, converted to this editor's slider scale.
+function autoTone() {
+  const im = CUR(), pd = state.previewData; if (!im || !pd || pd.imId !== im.id) return;
+  const U = baseUniforms(im.params), w = U.wb, d = pd.data, n = pd.w * pd.h, step = Math.max(1, Math.floor(n / 250000)); let s = 0, k = 0;
+  for (let p = 0; p < n; p += step) { const i = p * 3, y = (0.2126 * d[i] * w[0] + 0.7152 * d[i + 1] * w[1] + 0.0722 * d[i + 2] * w[2]) / 65535; s += Math.log2(Math.max(y, 1e-6) / 0.18); k++; }
+  const m = s / Math.max(k, 1), raw = !im.file._isImage;
+  const exposure = Math.round(Math.max(-2, Math.min(3, -0.58 - 0.41 * m)) * 100) / 100;
+  Object.assign(im.params, raw ? { exposure, contrast: 24, highlights: -40, shadows: 42, whites: 0, blacks: 0, vibrance: 20, saturation: 0 }
+    : { exposure: Math.round(Math.max(-1, Math.min(1, exposure * 0.5)) * 100) / 100, contrast: 10, highlights: -25, shadows: 25, whites: 0, blacks: 0, vibrance: 12, saturation: 0 });
+  im.presetId = null; refreshAll(); commit(); toast(`自動：曝光 ${fmt.ev(im.params.exposure)}，亮部、暗部與鮮豔度已調整`);
+}
+
 // ---------- uniforms ----------
 // im (optional) supplies the lens metadata and image size; opts.export disables the on-screen mask overlay.
 function uniformsFromParams(p, im, opts = {}) {
-  const U = baseUniforms(p);
+  const U = baseUniforms(profileParams(p));
+  U.baseTone = im && !(im.file && im.file._isImage) && p.profile !== 'flat' ? 1 : 0; // display-referred JPEG/HEIC get no base tone
   if (im) { const L = lensFor(im, p.lens || DEFAULTS.lens); U.lensOn = L.on; U.lens = L.table; U.defringe = ((p.lens && p.lens.defringe) || 0) / 100; }
   packMasks(U, p.masks || []);
   { const pcs = (p.pointColors || []).slice(0, 4); U.nPC = pcs.length; if (pcs.length) { U.pcA = new Float32Array(16); U.pcB = new Float32Array(16);
@@ -297,6 +339,12 @@ function buildPanels() {
     tabs.append(el('button', { 'data-tab': t.id, onclick: () => selectTab(t.id) }, t.name));
     const sec = el('div', { class: 'sec', id: 'sec-' + t.id }); panel.append(sec);
     if (SL[t.id]) { sec.append(hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設'))); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
+    if (t.id === 'light') {
+      const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
+      for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
+      const auto = el('button', { class: 'primary', onclick: () => autoTone() }, '自動');
+      sec.insertBefore(el('div', {}, hdr('描述檔', auto), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%')), sec.children[0]);
+    }
     if (t.id === 'color') {
       const wbBar = el('div', { class: 'toolbar wbbar' }, el('span', { class: 'hint' }, '白平衡'),
         el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.temp = 0; im.params.tint = 0; refreshAll(); commit(); } }, '原廠'),
@@ -399,7 +447,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷' };
@@ -636,17 +684,20 @@ function pickWBAt(e) {
   state.pickWB = false; const b = $('#wbPick'); if (b) b.classList.remove('on');
   applyWB(t, ti, out);
 }
-// Auto white balance: grey-world over mid tones, ignoring clipped and very dark pixels and the most saturated colours.
+// Auto white balance (LightCraft's weighting, MIT): average the as-shot linear colour, weighted towards low-chroma mid tones
+// around 2^-2.5 of white; the white balance that makes that average neutral is the answer.
 function autoWB() {
   const im = CUR(), pd = state.previewData; if (!im || !pd || pd.imId !== im.id) return;
-  const d = pd.data, n = pd.w * pd.h, step = Math.max(1, Math.floor(n / 200000)); let R = 0, G = 0, B = 0, k = 0;
+  const d = pd.data, n = pd.w * pd.h, step = Math.max(1, Math.floor(n / 250000)); let R = 0, G = 0, B = 0, W = 0;
   for (let p = 0; p < n; p += step) {
-    const i = p * 3, r = d[i], g = d[i + 1], b = d[i + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-    if (mx > 62000 || mx < 1500 || (mx - mn) / mx > 0.6) continue;
-    R += r; G += g; B += b; k++;
+    const i = p * 3, r = d[i] / 65535, g = d[i + 1] / 65535, b = d[i + 2] / 65535, y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if (y < 0.01 || y > 2) continue;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), ch = (mx - mn) / (mx + 1e-6);
+    const w = (1 - ch) ** 2 * (1 - Math.min(Math.abs((Math.log2(y) + 2.5) / 4), 1)); if (w <= 0) continue;
+    R += r * w; G += g * w; B += b * w; W += w;
   }
-  if (k < 100) { toast('這張照片沒有足夠的中性區域可以自動判斷'); return; }
-  const [t, ti, out] = wbFromRGB(R / k, G / k, B / k); applyWB(t, ti, out);
+  if (W <= 0) { toast('這張照片沒有足夠的中性區域可以自動判斷'); return; }
+  const [t, ti, out] = wbFromRGB(R / W, G / W, B / W); applyWB(t, ti, out);
 }
 $('#histo').addEventListener('click', () => {
   state.clipWarn = !state.clipWarn; $('#histo').classList.toggle('clip', state.clipWarn);
@@ -1471,7 +1522,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
