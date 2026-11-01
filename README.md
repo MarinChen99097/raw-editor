@@ -61,6 +61,8 @@ iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接
   - 數值來自 GitHub 上的 Lightroom／darktable／RawTherapee 預設檔、富士官方說明、Fuji X Weekly 和中日文調色教學，換算方式與每個預設的出處見 [PRESETS.md](PRESETS.md)。都是外觀近似，不是相機實測。
 - 自訂預設集可匯出／匯入 JSON
 - 復原／重做、按住比較原圖、雙擊比較鈕進入左右分割檢視
+- 手機操作：8 個工具在底部工具列，面板可拉高／收合；按住照片看原圖、左右滑動換下一張；滑桿點兩下歸零、點數值可直接輸入，桌機可用方向鍵微調（Shift ×10）
+- 深色與淺色（戶外）兩種外觀，在「更多」裡切換
 - 多張照片底片條、複製／貼上設定、貼到全部、批次匯出
 - 每張照片的編輯自動存在瀏覽器裡（同一個檔再開會記得），也可存成同名 `.json` 一起帶走
 - 匯出：JPEG（品質可調）或 TIFF 16 位元（deflate 無損壓縮），都會寫入 EXIF（相機／鏡頭／曝光資訊），全尺寸或指定長邊
@@ -82,6 +84,7 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 - `src/lensmeta.js`：讀取 Sony／Fujifilm／DNG 內嵌鏡頭校正資料（在解碼 worker 內執行）
 - `src/nikonfast.js`：Nikon 無損壓縮 NEF 快速解碼
 - `src/app.js`：UI、幾何（旋轉／拉直／裁切）、狀態、匯出流程
+- `src/tokens.css`、`src/style.css`、`src/icons.js`：RAW Editor 設計系統的 token、元件樣式與線條圖示
 - `src/presets.js`、`src/curve.js`
 
 ## Lightroom 功能對照

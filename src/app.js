@@ -10,7 +10,11 @@ function layout() { app.classList.toggle('desktop', innerWidth >= 900 && innerWi
 layout(); addEventListener('resize', () => { layout(); fitCanvas(); requestDraw(); });
 
 // ---------- toast / status ----------
-let toastT; function toast(msg, ms = 2200) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
+let toastT; function toast(msg, ms = 2400, opts = {}) { // design-system toast: icon for success / error, at most one action
+  const t = $('#toast'); const err = opts.kind === 'err' || /^(無法|匯出失敗|讀取失敗)|失敗：/.test(msg), ok = !err && (opts.kind === 'ok' || /^已/.test(msg));
+  t.className = err ? 'err' : ''; t.innerHTML = ''; if (err || ok) { const s = el('span', { class: err ? 'err' : 'ok' }); s.innerHTML = iconSVG(err ? 'close' : 'check', 16); t.append(s); }
+  t.append(el('span', {}, msg)); if (opts.action) { t.append(el('button', { class: 'act', onclick: () => { t.classList.remove('on'); opts.action.fn(); } }, opts.action.label)); ms = Math.max(ms, 5000); }
+  void t.offsetWidth; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), ms); }
 function status(msg) { const s = $('#status'); if (!msg) { s.classList.remove('on'); return; } s.textContent = msg; s.classList.add('on'); }
 
 // ---------- decoder worker ----------
@@ -298,32 +302,54 @@ function sliderTarget(path) {
   return [CUR() ? CUR().params : null, path, defaultsFor(CUR())];
 }
 function makeSlider(path, label, min, max, step, format, grad) {
+  // design-system slider: bipolar fill from 0 with a tick, relative drag near the knob (jump when pressed far away),
+  // double tap resets, tap the value to type it, keyboard (arrows, Shift = x10, Home/End, Backspace = reset), modified value in amber
   const [, sub0, defs] = sliderTarget(path); const def = getPath(defs, sub0);
-  const root = el('div', { class: 'sl' + (grad ? ' colorful' : ''), style: grad ? `--grad:${grad}` : '' });
+  const root = el('div', { class: 'sl' + (grad ? ' colorful' : ''), style: grad ? `--grad:${grad}` : '', role: 'slider', tabindex: '0', 'aria-label': label, 'aria-valuemin': String(min), 'aria-valuemax': String(max) });
   const lbl = el('span', { class: 'lbl' }, label), val = el('span', { class: 'val' });
   const track = el('div', { class: 'track' }), fill = el('div', { class: 'fill' }), knob = el('div', { class: 'knob' });
-  track.append(fill, knob); root.append(lbl, val, track);
+  const zero = min < def && def < max ? el('div', { class: 'zero' }) : null;
+  if (zero) track.append(zero); track.append(fill, knob); root.append(lbl, val, track);
+  const cur = () => { const [obj, sub] = sliderTarget(path); let v = def; try { if (obj) v = getPath(obj, sub) ?? def; } catch { } return v; };
   const update = () => {
-    const [obj, sub] = sliderTarget(path); let v = def; try { if (obj) v = getPath(obj, sub) ?? def; } catch { }
-    val.textContent = format(v); val.classList.toggle('changed', Math.abs(v - def) > 1e-9);
+    const v = cur(); val.textContent = format(v); val.classList.toggle('changed', Math.abs(v - def) > 1e-9);
     const t = (v - min) / (max - min), d = (def - min) / (max - min);
-    knob.style.left = (t * 100) + '%'; fill.style.left = (Math.min(t, d) * 100) + '%'; fill.style.width = (Math.abs(t - d) * 100) + '%';
+    knob.style.left = (t * 100) + '%'; fill.style.left = (Math.min(t, d) * 100) + '%'; fill.style.width = (Math.abs(t - d) * 100) + '%'; if (zero) zero.style.left = (d * 100) + '%';
+    root.setAttribute('aria-valuenow', String(v)); root.setAttribute('aria-valuetext', format(v));
   };
-  let dragging = false, startX = 0, startV = 0, moved = false, lastTap = 0;
-  const setFromClient = (cx, fine) => { const r = track.getBoundingClientRect(); let v = min + clamp((cx - r.left) / r.width, 0, 1) * (max - min); v = Math.round(v / step) * step; setParam(path, +v.toFixed(4), false); };
+  const put = (v, commitNow) => { v = clamp(Math.round(v / step) * step, min, max); setParam(path, +v.toFixed(4), commitNow); };
+  let dragging = false, startX = 0, startV = 0, moved = false, lastTap = 0, prevSide = 0;
+  const side = v => Math.sign(Math.round((v - def) / step));
+  const setFromClient = cx => { const r = track.getBoundingClientRect(); put(min + clamp((cx - r.left) / r.width, 0, 1) * (max - min), false); };
   track.addEventListener('pointerdown', e => {
-    const [obj, sub] = sliderTarget(path); if (!CUR() || !obj) return; e.preventDefault(); track.setPointerCapture(e.pointerId); dragging = true; moved = false; startX = e.clientX; startV = getPath(obj, sub) ?? def;
+    const [obj] = sliderTarget(path); if (!CUR() || !obj) return; e.preventDefault(); try { track.setPointerCapture(e.pointerId); } catch { }
+    dragging = true; moved = false; startX = e.clientX; startV = cur(); prevSide = side(startV);
     const now = Date.now(); if (now - lastTap < 320) { setParam(path, def, true); dragging = false; lastTap = 0; return; } lastTap = now;
+    const r = track.getBoundingClientRect(), kx = r.left + (startV - min) / (max - min) * r.width;
+    if (Math.abs(e.clientX - kx) > 16) { setFromClient(e.clientX); startV = cur(); startX = e.clientX; moved = true; } // far from the knob: jump there, then drag relatively
+    root.classList.add('dragging');
   });
   track.addEventListener('pointermove', e => {
-    if (!dragging) return; const dx = e.clientX - startX; if (Math.abs(dx) > 2) moved = true;
-    if (!moved) return;
-    const r = track.getBoundingClientRect(); const fine = e.shiftKey ? 0.2 : 1; const dv = dx / r.width * (max - min) * fine;
-    let v = clamp(startV + dv, min, max); v = Math.round(v / step) * step; setParam(path, +v.toFixed(4), false);
+    if (!dragging) return; const dx = e.clientX - startX; if (Math.abs(dx) > 2) moved = true; if (!moved) return;
+    const r = track.getBoundingClientRect(); const fine = e.shiftKey ? 0.25 : 1; put(startV + dx / r.width * (max - min) * fine, false);
+    const sd = side(cur()); if (sd !== prevSide && navigator.vibrate) { try { navigator.vibrate(8); } catch { } } prevSide = sd; // light tick when crossing the default (Android)
   });
-  const up = e => { if (!dragging) return; dragging = false; if (!moved) { setFromClient(e.clientX); } commit(); };
-  track.addEventListener('pointerup', up); track.addEventListener('pointercancel', () => { if (dragging) { dragging = false; commit(); } });
+  const up = () => { if (!dragging) return; dragging = false; root.classList.remove('dragging'); commit(); };
+  track.addEventListener('pointerup', up); track.addEventListener('pointercancel', up);
   lbl.addEventListener('dblclick', () => setParam(path, def, true));
+  root.addEventListener('keydown', e => {
+    if (e.target !== root) return; const k = e.key, m = e.shiftKey ? 10 : 1, v = cur();
+    if (k === 'ArrowRight' || k === 'ArrowUp') put(v + step * m, true); else if (k === 'ArrowLeft' || k === 'ArrowDown') put(v - step * m, true);
+    else if (k === 'Home') put(min, true); else if (k === 'End') put(max, true); else if (k === 'Backspace' || k === 'Delete') setParam(path, def, true); else return;
+    e.preventDefault(); e.stopPropagation();
+  });
+  val.addEventListener('click', () => { // type a value
+    const [obj] = sliderTarget(path); if (!CUR() || !obj) return;
+    const inp = el('input', { class: 'valin', type: 'text', inputmode: 'decimal', value: String(+cur().toFixed(4)) }); val.replaceWith(inp); inp.focus(); inp.select();
+    let done = false; const fin = ok => { if (done) return; done = true; if (ok) { const n = parseFloat(String(inp.value).replace(/[^\d.+-]/g, '')); if (isFinite(n)) put(n, true); } inp.replaceWith(val); update(); };
+    inp.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') fin(true); else if (e.key === 'Escape') fin(false); });
+    inp.addEventListener('blur', () => fin(true));
+  });
   sliders.set(path, { update, root }); update();
   return root;
 }
@@ -350,9 +376,8 @@ function hdr(title, ...btns) { return el('div', { class: 'hdr' }, el('span', {},
 function buildPanels() {
   const tabs = $('#tabs'), panel = $('#panel');
   for (const t of TABS) {
-    tabs.append(el('button', { 'data-tab': t.id, onclick: () => selectTab(t.id) }, t.name));
     const sec = el('div', { class: 'sec', id: 'sec-' + t.id }); panel.append(sec);
-    if (SL[t.id]) { sec.append(hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設'))); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
+    if (SL[t.id]) { const h = hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設')); nav.sections.push({ el: h, keys: SL[t.id].map(s => s[0]) }); sec.append(h); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
       for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
@@ -443,15 +468,11 @@ function buildPanels() {
 }
 function hueGrad(i) { const c = HSL_COLORS; return `linear-gradient(90deg,${c[(i + 7) % 8]},${c[i]},${c[(i + 1) % 8]})`; }
 function selectTab(id) {
-  state.tab = id; [...$('#tabs').children].forEach(b => b.classList.toggle('on', b.dataset.tab === id));
+  state.tab = id; updateNav(id);
   [...$('#panel').children].forEach(s => s.classList.toggle('on', s.id === 'sec-' + id));
-  { // keep the active tab visible by scrolling only the tab bar (scrollIntoView could also shift ancestors)
-    const bar = $('#tabs'), tb = bar.querySelector(`[data-tab="${id}"]`);
-    if (tb && (tb.offsetLeft < bar.scrollLeft || tb.offsetLeft + tb.offsetWidth > bar.scrollLeft + bar.clientWidth)) bar.scrollTo({ left: tb.offsetLeft - (bar.clientWidth - tb.offsetWidth) / 2, behavior: 'smooth' });
-  }
   const wasLocal = !!selectTab.prevLocal; selectTab.prevLocal = id === 'local';
   const wasCrop = state.cropMode; state.cropMode = id === 'crop'; state.cursor = null;
-  $('#side').classList.toggle('tall', id === 'curve' || id === 'hsl' || id === 'presets');
+  if (panelMode === 'auto') $('#side').classList.toggle('tall', id === 'curve' || id === 'hsl' || id === 'presets');
   if (id === 'curve') setTimeout(() => curveEd.draw(), 0);
   if (id === 'presets') schedulePresetThumbs();
   if (id === 'info') renderHistoryUI();
@@ -462,7 +483,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; for (const k of keys) setPath(im.params, k, getPath(defaultsFor(im), k)); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷', sky: '天空', subject: '主體', background: '背景' };
@@ -1362,6 +1383,163 @@ async function upgradeSubjectMask(m) {
   } catch (e) { console.error(e); status(''); toast('AI 模型無法使用（' + (e.message || e) + '），先用一般演算法選取。', 5000); }
 }
 
+// ---------- design-system shell: grouped navigation, panel, gestures, theme ----------
+// Eight groups in editing order (design system "ToolBar" / "Tabs"); groups with several sections get a segmented sub-nav.
+const GROUPS = [
+  { id: 'presets', name: '預設', icon: 'presets', tabs: [['presets', '預設集']] },
+  { id: 'light', name: '光線', icon: 'light', tabs: [['light', '光線']] },
+  { id: 'color', name: '顏色', icon: 'color', tabs: [['color', '基本'], ['hsl', 'HSL／點顏色'], ['grade', '色調分級']] },
+  { id: 'curve', name: '曲線', icon: 'curve', tabs: [['curve', '曲線']] },
+  { id: 'fx', name: '效果', icon: 'effects', tabs: [['fx', '效果']] },
+  { id: 'detail', name: '細節', icon: 'detail', tabs: [['detail', '細節']] },
+  { id: 'local', name: '局部', icon: 'mask', tabs: [['local', '遮罩'], ['heal', '修復']] },
+  { id: 'geo', name: '幾何', icon: 'crop', tabs: [['crop', '裁切與變形'], ['lens', '鏡頭']] },
+];
+const GROUP_KEYS = {
+  presets: ['film'], light: ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'profile', 'profileAmt'],
+  color: ['temp', 'tint', 'vibrance', 'saturation', 'hsl', 'pointColors', 'bw', 'bwmix', 'grade', 'calib'], curve: ['curves', 'pcurve'],
+  fx: ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'],
+  detail: ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], local: ['masks', 'spots'], geo: ['geo', 'lens'],
+};
+const groupOf = tab => GROUPS.find(g => g.tabs.some(t => t[0] === tab));
+const nav = { sub: {}, sections: [] }; // last sub-tab per group; [{el, keys}] section headers with a modified dot
+function buildNav() {
+  const tabs = $('#tabs'), tb = $('#toolbar'); tabs.innerHTML = ''; tb.innerHTML = '';
+  for (const g of GROUPS) {
+    const go = () => {
+      const cur = groupOf(state.tab);
+      if (cur === g && !app.classList.contains('desktop')) { setPanelMode($('#side').classList.contains('collapsed') ? 'auto' : 'collapsed'); return; } // tapping the current tool folds the panel
+      selectTab(nav.sub[g.id] || g.tabs[0][0]); if ($('#side').classList.contains('collapsed')) setPanelMode('auto');
+    };
+    tabs.append(el('button', { 'data-group': g.id, 'data-tab': g.tabs[0][0], role: 'tab', onclick: go }, g.name, el('span', { class: 'dot' })));
+    const b = el('button', { 'data-group': g.id, 'data-tab': g.tabs[0][0], role: 'tab', 'aria-label': g.name, onclick: go }); b.innerHTML = iconSVG(g.icon) + `<span>${g.name}</span><span class="dot"></span>`; tb.append(b);
+  }
+  updateNav(state.tab);
+}
+function updateNav(tab) {
+  const g = groupOf(tab); if (g) nav.sub[g.id] = tab;
+  for (const bar of [$('#tabs'), $('#toolbar')]) for (const b of bar.children) b.classList.toggle('on', !!g && b.dataset.group === g.id);
+  const st = $('#subtabs'); st.innerHTML = '';
+  if (g && g.tabs.length > 1) { for (const [id, name] of g.tabs) st.append(el('button', { class: id === tab ? 'on' : '', role: 'tab', onclick: () => selectTab(id) }, name)); st.classList.add('on'); }
+  else st.classList.remove('on');
+  for (const bar of [$('#tabs'), $('#toolbar')]) { const b = g && bar.querySelector(`[data-group="${g.id}"]`); if (b && (b.offsetLeft < bar.scrollLeft || b.offsetLeft + b.offsetWidth > bar.scrollLeft + bar.clientWidth)) bar.scrollTo({ left: b.offsetLeft - (bar.clientWidth - b.offsetWidth) / 2, behavior: 'smooth' }); }
+}
+function refreshNavDots() {
+  const im = CUR(); const d = im ? defaultsFor(im) : null; const p = im ? im.params : null;
+  const differs = k => { if (!p) return false; const a = p[k], b = d[k]; if (k === 'masks' || k === 'spots' || k === 'pointColors') return !!(a && a.length); return JSON.stringify(a) !== JSON.stringify(b); };
+  for (const bar of [$('#tabs'), $('#toolbar')]) for (const b of bar.children) b.classList.toggle('mod', (GROUP_KEYS[b.dataset.group] || []).some(differs));
+  for (const s of nav.sections) s.el.classList.toggle('mod', s.keys.some(k => p && JSON.stringify(getPath(p, k)) !== JSON.stringify(getPath(d, k))));
+}
+// phone panel: peek (38vh) / tall (56vh) / collapsed (only the grab bar); drag the grab bar to snap
+let panelMode = 'auto';
+function setPanelMode(m) {
+  panelMode = m; const side = $('#side');
+  side.classList.toggle('collapsed', m === 'collapsed');
+  if (m === 'peek') side.classList.remove('tall'); else if (m === 'tall') side.classList.add('tall');
+  else if (m === 'auto') side.classList.toggle('tall', ['curve', 'hsl', 'presets'].includes(state.tab));
+  side.style.height = '';
+}
+function initPanelDrag() {
+  const side = $('#side'), grab = $('#grab'); let drag = null;
+  grab.addEventListener('pointerdown', e => { if (app.classList.contains('desktop')) return; try { grab.setPointerCapture(e.pointerId); } catch { } drag = { y: e.clientY, h: side.getBoundingClientRect().height, moved: false }; side.classList.add('dragging'); });
+  grab.addEventListener('pointermove', e => { if (!drag) return; const dy = drag.y - e.clientY; if (Math.abs(dy) > 4) drag.moved = true; side.classList.remove('collapsed'); side.style.height = Math.max(22, Math.min(innerHeight * 0.6, drag.h + dy)) + 'px'; });
+  const end = () => { if (!drag) return; side.classList.remove('dragging');
+    if (!drag.moved) { setPanelMode(side.classList.contains('collapsed') ? 'auto' : 'collapsed'); drag = null; return; }
+    const h = side.getBoundingClientRect().height / innerHeight; drag = null;
+    setPanelMode(h < 0.2 ? 'collapsed' : h < 0.47 ? 'peek' : 'tall'); };
+  grab.addEventListener('pointerup', end); grab.addEventListener('pointercancel', end);
+  // the photo area follows the panel live (drag, snap, collapse, first photo): refit and redraw in the same frame so it never stretches
+  let rt = 0; new ResizeObserver(() => { const w = view.width, h = view.height; fitCanvas(); if (view.width !== w || view.height !== h) { draw(); clearTimeout(rt); rt = setTimeout(() => requestRender(false), 150); } }).observe($('#stage'));
+}
+// theme: dark (default) / light (outdoor); the photo surround follows the canvas token
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t; try { localStorage.setItem('rawedit:theme', t); } catch { }
+  const cs = getComputedStyle(document.documentElement);
+  const hex = cs.getPropertyValue('--canvas').trim(); const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (m && renderer) { const v = parseInt(m[1], 16); renderer.bgColor = [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255]; draw(); }
+  const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = cs.getPropertyValue('--surface').trim();
+  for (const b of $('#themeSeg').children) b.classList.toggle('on', b.dataset.theme === t);
+}
+// one-line shooting info under the file name
+function exifLine(im) {
+  const m = im.meta || {}; const sh = m.shutter ? (m.shutter >= 1 ? m.shutter.toFixed(1) + 's' : '1/' + Math.round(1 / m.shutter) + 's') : '';
+  const parts = [m.model || '', m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + (+m.aperture.toFixed(1)) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean);
+  return parts.length ? parts.join(' · ') : `${im.fullW}×${im.fullH}`;
+}
+function initDesignUI() {
+  for (const b of document.querySelectorAll('[data-icon]')) { const lbl = b.dataset.label; b.innerHTML = iconSVG(b.dataset.icon, lbl ? 18 : 22) + (lbl ? `<span>${lbl}</span>` : ''); }
+  buildNav(); initPanelDrag();
+  const info = $('#sec-info'); if (info) { $('#menuInfo').append(info); info.classList.add('on'); }
+  $('#mRedo').onclick = () => { $('#modalMenu').classList.remove('on'); redo(); };
+  $('#mFilm').onclick = () => { $('#modalMenu').classList.remove('on'); $('#btnFilm').onclick(); };
+  for (const b of $('#themeSeg').children) b.onclick = () => applyTheme(b.dataset.theme);
+  let t = 'dark'; try { t = localStorage.getItem('rawedit:theme') || 'dark'; } catch { } applyTheme(t);
+  // export format as a segmented control (the select stays the source of truth)
+  const fs = $('#expFmtSeg'), sel = $('#expFmt');
+  for (const o of sel.options) fs.append(el('button', { 'data-v': o.value, onclick: () => { sel.value = o.value; sel.dispatchEvent(new Event('change')); syncFmt(); } }, o.value === 'jpeg' ? 'JPEG' : o.value === 'tiff' ? 'TIFF 16 位元' : 'PNG 16 位元'));
+  const syncFmt = () => { for (const b of fs.children) b.classList.toggle('on', b.dataset.v === sel.value); }; sel.addEventListener('change', syncFmt); syncFmt();
+  // drag a file over the photo: dashed accent frame
+  const stage = $('#stage'); let dz = 0;
+  vw.addEventListener('dragenter', () => { dz++; stage.classList.add('dragover'); }); vw.addEventListener('dragleave', () => { if (--dz <= 0) { dz = 0; stage.classList.remove('dragover'); } });
+  vw.addEventListener('drop', () => { dz = 0; stage.classList.remove('dragover'); });
+  initPhotoGestures(); initSheets();
+}
+// sheets (export, more, paste): Esc closes, focus moves in on open and back on close, swipe the grab bar / title down to close (phone)
+function initSheets() {
+  const closeable = m => !(m.id === 'modalExport' && state.busy);
+  const onToggle = m => {
+    const on = m.classList.contains('on'); if (on === !!m._open) return; m._open = on;
+    const sh = m.querySelector('.sheet'); if (!sh) return;
+    if (on) {
+      m._ret = document.activeElement; sh.style.transform = ''; sh.style.transition = '';
+      if (!sh.querySelector(':scope > .sgrab')) sh.prepend(el('div', { class: 'sgrab', 'aria-hidden': 'true' }));
+      const f = [...sh.querySelectorAll('button, select, input, [tabindex="0"]')].find(x => !x.disabled && x.offsetParent && !x.closest('.sgrab'));
+      if (f) try { f.focus({ preventScroll: true }); } catch { }
+    } else if (m._ret && m._ret.isConnected && m._ret.focus) { try { m._ret.focus({ preventScroll: true }); } catch { } m._ret = null; }
+  };
+  const watch = m => { if (m._watched) return; m._watched = true; new MutationObserver(() => onToggle(m)).observe(m, { attributes: true, attributeFilter: ['class'] }); };
+  document.querySelectorAll('.modal').forEach(watch);
+  new MutationObserver(ms => { for (const r of ms) for (const n of r.addedNodes) if (n.classList && n.classList.contains('modal')) watch(n); }).observe(document.body, { childList: true });
+  addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return; const open = [...document.querySelectorAll('.modal.on')].pop(); if (!open || !closeable(open)) return;
+    e.preventDefault(); e.stopPropagation(); open.classList.remove('on');
+  }, true);
+  document.addEventListener('pointerdown', e => {
+    if (app.classList.contains('desktop') || e.button !== 0) return;
+    const sh = e.target.closest && e.target.closest('.modal.on > .sheet'); if (!sh || !e.target.closest('.sgrab, .sheet > h3') || e.target.closest('button, input, select')) return;
+    const m = sh.parentElement, y0 = e.clientY, t0 = Date.now(), H = sh.getBoundingClientRect().height; let dy = 0;
+    sh.style.transition = 'none';
+    const mv = ev => { dy = Math.max(0, ev.clientY - y0); sh.style.transform = dy ? `translateY(${dy}px)` : ''; };
+    const up = () => {
+      removeEventListener('pointermove', mv); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
+      sh.style.transition = 'transform 200ms ease-out';
+      if ((dy > 90 || (dy > 40 && Date.now() - t0 < 250)) && closeable(m)) { sh.style.transform = `translateY(${H}px)`; setTimeout(() => m.classList.remove('on'), 190); }
+      else sh.style.transform = '';
+    };
+    addEventListener('pointermove', mv); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+  });
+}
+// press and hold the photo = original; swipe left/right = next/previous photo (when fitted and not in a tool that uses touches)
+function initPhotoGestures() {
+  let g = null;
+  const busyTab = () => ['local', 'heal', 'crop'].includes(state.tab) || state.pickWB || state.pickPC || state.pickCR;
+  view.addEventListener('pointerdown', e => {
+    if (!CUR() || busyTab() || e.button !== 0) { g = null; return; }
+    if (g && g.id !== e.pointerId) { clearTimeout(g.t); if (g.hold) { state.compare = 0; draw(); } g = null; return; } // second finger: pinch
+    g = { id: e.pointerId, x: e.clientX, y: e.clientY, t0: Date.now(), hold: false, moved: false };
+    g.t = setTimeout(() => { if (!g || g.moved) return; g.hold = true; ensureBefore(); if (state.compare !== 2) { state.compare = 1; draw(); } }, 380);
+  }, true);
+  view.addEventListener('pointermove', e => { if (!g || e.pointerId !== g.id) return; if (Math.hypot(e.clientX - g.x, e.clientY - g.y) > 10) { g.moved = true; clearTimeout(g.t); } }, true);
+  const end = e => {
+    if (!g || e.pointerId !== g.id) return; clearTimeout(g.t);
+    if (g.hold) { if (state.compare === 1) { state.compare = 0; draw(); } g = null; return; }
+    const dx = e.clientX - g.x, dy = e.clientY - g.y, dt = Date.now() - g.t0;
+    if (images.length > 1 && dt < 450 && Math.abs(dx) > 70 && Math.abs(dy) < 50 && Math.abs(state.zoom - 1) < 1e-6) { const n = cur + (dx < 0 ? 1 : -1); if (n >= 0 && n < images.length) selectImage(n); }
+    g = null;
+  };
+  view.addEventListener('pointerup', end, true); view.addEventListener('pointercancel', e => { if (g && e.pointerId === g.id) { clearTimeout(g.t); if (g.hold && state.compare === 1) { state.compare = 0; draw(); } g = null; } }, true);
+}
+
 // ---------- film emulation LUTs ----------
 // FILM_LUTS (filmluts.js): { size, list:[{id,name,d,...}], data: base64(zlib(all LUTs, size^3*3 bytes each, red fastest)) }
 const FILM_LIST = (typeof FILM_LUTS !== 'undefined' && FILM_LUTS.list) || [];
@@ -1444,7 +1622,7 @@ function renderPresetGrid() {
     const off = !it.user && it.id !== 'none' && hiddenPresets.has(it.id);
     const click = () => {
       if (edit) { if (it.user || it.id === 'none') return; hiddenPresets.has(it.id) ? hiddenPresets.delete(it.id) : hiddenPresets.add(it.id); saveHidden(); b.classList.toggle('off'); return; }
-      it.id === 'none' ? clearPresetUI() : applyPresetUI(it.p, it.id);
+      if (it.id === 'none') clearPresetUI(); else if (b.classList.contains('on')) clearPresetUI(); else applyPresetUI(it.p, it.id); // tapping the selected card again = back to before
     };
     const attrs = { class: 'pcard' + (it.user ? ' user' : '') + (off ? ' off' : '') + (edit ? ' editing' : ''), 'data-id': it.id, onclick: click };
     if (it.user) attrs.oncontextmenu = e => { e.preventDefault(); if (confirm('刪除預設集「' + it.p.name + '」？')) { userPresets.splice(it.i, 1); saveUserPresets(); renderPresetGrid(); } };
@@ -1531,7 +1709,7 @@ function commit() {
   im.hist = im.hist.slice(0, im.hi + 1); im.hist.push(snap); if (im.hist.length > 60) im.hist.shift(); im.hi = im.hist.length - 1;
   im.edited = JSON.stringify(stripAmount(im.params)) !== JSON.stringify(clone(defaultsFor(im)));
   if (state.tab === 'presets') { refreshPresetUI(); clearTimeout(commit.pt); commit.pt = setTimeout(schedulePresetThumbs, 500); }
-  if (state.tab === 'info') renderHistoryUI(); updateUndoButtons(); saveEdits(im); updateFilmstrip();
+  renderHistoryUI(); refreshNavDots(); updateUndoButtons(); saveEdits(im); updateFilmstrip();
 }
 function stripAmount(p) { const c = clone(p); delete c._presetAmount; return c; }
 function undo() { const im = CUR(); if (!im || im.hi <= 0) return; im.hi--; im.params = JSON.parse(im.hist[im.hi]); im.presetId = null; refreshAll(); updateUndoButtons(); saveEdits(im); }
@@ -1906,7 +2084,7 @@ async function addFiles(files) {
     images.push(im); if (firstNew < 0) firstNew = images.length - 1;
     makeThumb(im);
   }
-  $('#drop').style.display = 'none'; $('#filmstrip').classList.toggle('hidden', images.length < 2);
+  $('#drop').style.display = 'none'; app.classList.remove('empty'); $('#filmstrip').classList.toggle('hidden', images.length < 2);
   updateFilmstrip();
   if (firstNew >= 0) selectImage(firstNew);
 }
@@ -1951,7 +2129,7 @@ async function selectImage(i) {
     curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveLUTFor(im.params));
     fitCanvas(); fitView(); refreshLensUI(); refreshLocalUI(); requestRender(false); showInfo(); $('#btnExport').disabled = false;
     schedulePresetThumbs();
-    $('#finfo').textContent = `${im.fullW}×${im.fullH} · 預覽 ${r.width}×${r.height} · ${(r.timings.total / 1000).toFixed(1)}s`;
+    $('#finfo').textContent = exifLine(im); $('#finfo').title = $('#finfo').dataset.dims = `${im.fullW}×${im.fullH} · 預覽 ${r.width}×${r.height} · ${(r.timings.total / 1000).toFixed(1)}s`;
     status('');
     if (im.file._isImage && IS_IOS && /\.jpe?g$/i.test(im.name) && !selectImage.iosHint) { selectImage.iosHint = true; toast('提示：從「照片圖庫」選的照片，iPhone 一律轉成 JPEG 給網頁，RAW 也會被轉。要修 RAW 請按＋選「選擇檔案」。', 8000); }
   } catch (e) { if (seq === loadSeq) { status(''); toast('無法開啟：' + friendlyError(e), 8000); ti.style.display = 'none'; } console.error(e); }
@@ -1982,7 +2160,7 @@ $('#mLoadJson').onclick = () => { const inp = el('input', { type: 'file', accept
 $('#mCopy').onclick = () => { const im = CUR(); if (!im) return; state.clipboard = stripAmount(im.params); toast('已複製設定'); };
 $('#mPaste').onclick = () => openPasteDialog(false);
 $('#mPasteAll').onclick = () => openPasteDialog(true);
-$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = clone(defaultsFor(im)); im.presetId = null; refreshAll(); fitView(); commit(); };
+$('#mReset').onclick = () => { const im = CUR(); if (!im) return; im.params = clone(defaultsFor(im)); im.presetId = null; refreshAll(); fitView(); commit();  $('#modalMenu').classList.remove('on'); toast('已重設這張照片', 5000, { action: { label: '復原', fn: undo } }); };
 $('#mExportPresets').onclick = () => download(new Blob([JSON.stringify({ app: 'RAW Editor', presets: userPresets }, null, 1)], { type: 'application/json' }), 'raw-editor-presets.json');
 $('#mImportPresets').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { const j = JSON.parse(await inp.files[0].text()); const list = j.presets || (Array.isArray(j) ? j : null); if (!list) throw new Error('格式不符'); for (const p of list) if (p && p.name && p.p) userPresets.push(p); saveUserPresets(); renderPresetGrid(); toast('已匯入 ' + list.length + ' 個預設集'); } catch (e) { toast('匯入失敗：' + e.message); } }; inp.click(); };
 $('#optHQ').checked = state.hq; $('#optHQ').onchange = e => { state.hq = e.target.checked; try { localStorage.setItem('rawedit:hq', state.hq ? '1' : '0'); } catch { } };
@@ -2005,11 +2183,12 @@ addEventListener('keydown', e => {
 
 // ---------- export ----------
 const modalExport = $('#modalExport');
-$('#btnExport').onclick = () => { if (!CUR()) return; if (LOW_MEM && !modalExport.dataset.init) { $('#expSize').value = '4000'; } modalExport.dataset.init = 1; $('#expMsg').textContent = ''; $('#expBar').style.width = '0'; $('#expGo').disabled = false; $('#expGo').textContent = '開始匯出'; $('#expScope').style.display = images.length > 1 ? '' : 'none'; $('#expScope').parentElement.style.display = images.length > 1 ? '' : 'none'; modalExport.classList.add('on'); };
+$('#btnExport').onclick = () => { if (!CUR()) return; if (LOW_MEM && !modalExport.dataset.init) { $('#expSize').value = '4000'; } modalExport.dataset.init = 1; $('#expMsg').textContent = ''; $('#expBar').style.width = '0'; $('#expGo').disabled = false; $('#expGo').textContent = '開始匯出'; $('#expGo').classList.add('primary'); $('#expCancel').textContent = '取消'; $('#expCancel').style.display = ''; $('#expScope').style.display = images.length > 1 ? '' : 'none'; $('#expScope').parentElement.style.display = images.length > 1 ? '' : 'none'; modalExport.classList.add('on'); };
 { const f = $('#expFmt'); try { f.value = localStorage.getItem('rawedit:fmt') || 'jpeg'; } catch { } const sync = () => { $('#expQRow').style.display = f.value !== 'jpeg' ? 'none' : ''; try { localStorage.setItem('rawedit:fmt', f.value); } catch { } }; f.onchange = sync; sync(); }
 $('#expCancel').onclick =() => { if (state.busy) state.cancelExport = true; else modalExport.classList.remove('on'); };
 $('#expGo').onclick = async () => {
-  if (state.busy) return; state.busy = true; state.cancelExport = false; $('#expGo').disabled = true; $('#expGo').textContent = '處理中…';
+  if (state.busy) { state.cancelExport = true; $('#expGo').disabled = true; $('#expGo').textContent = '正在取消…'; return; }
+  state.busy = true; state.cancelExport = false; $('#expGo').textContent = '取消匯出'; $('#expGo').classList.remove('primary'); $('#expCancel').style.display = 'none';
   const sizeSel = $('#expSize').value, quality = clamp(+$('#expQ').value || 92, 50, 100), demosaic = $('#expDemosaic').value, wantExif = $('#expExif').checked, format = $('#expFmt').value;
   const list = $('#expScope').value === 'all' ? images.slice() : [CUR()];
   const results = []; let keptMB = 0;
@@ -2033,6 +2212,8 @@ $('#expGo').onclick = async () => {
       if (navigator.canShare({ files: [f] })) row.append(el('button', { class: 'primary', onclick: async () => { try { await navigator.share({ files: [f] }); } catch (e) { } } }, '分享 / 儲存到相簿'));
       row.append(el('button', { onclick: () => download(results[0].blob, results[0].name) }, '下載檔案'));
       $('#expMsg').append(el('div', { class: 'hint' }, `完成：${results[0].name}（${(results[0].blob.size / 1048576).toFixed(1)} MB）`), row);
+      if (navigator.canShare({ files: [f] })) toast('已匯出，可存到相簿', 5000, { kind: 'ok', action: { label: '分享', fn: () => navigator.share({ files: [f] }).catch(() => { }) } });
+      else toast('已匯出，點「下載檔案」儲存', 3000, { kind: 'ok' });
     } else if (results.length) {
       $('#expMsg').textContent = `完成 ${results.length} 張，共 ${(results.reduce((a, r) => a + r.size, 0) / 1048576).toFixed(1)} MB`;
       const kept = results.filter(r => r.blob);
@@ -2042,11 +2223,12 @@ $('#expGo').onclick = async () => {
         row.append(el('button', { onclick: () => kept.forEach((r, i) => setTimeout(() => download(r.blob, r.name), i * 400)) }, '全部下載'));
         $('#expMsg').append(row);
         if (kept.length < results.length) $('#expMsg').append(el('div', { class: 'hint' }, `另外 ${results.length - kept.length} 張已直接下載（避免占用太多記憶體）。`));
-      }
+        if (navigator.canShare({ files })) toast(`已匯出 ${results.length} 張`, 5000, { kind: 'ok', action: { label: '分享', fn: () => navigator.share({ files }).catch(() => { }) } });
+      } else toast(results.length > 1 ? `已匯出 ${results.length} 張到「下載」` : '已匯出到「下載」');
     }
     else if (state.cancelExport) $('#expMsg').textContent = '已取消';
   } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + friendlyError(e); }
-  finally { state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
+  finally { state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expGo').classList.add('primary'); $('#expCancel').textContent = '關閉'; $('#expCancel').style.display = ''; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
 };
 async function exportImage(im, o, prog) {
   const params = im.params; const Gfull0 = geometry(params.geo, im.fullW || 1, im.fullH || 1);
@@ -2083,7 +2265,7 @@ async function exportImage(im, o, prog) {
 
 // ---------- boot ----------
 window.__dbg = { activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
-buildPanels(); fitCanvas();
+buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
   try {

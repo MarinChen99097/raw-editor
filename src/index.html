@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#121214">
+<meta name="theme-color" content="#1a1a1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <title>RAW Editor</title>
@@ -11,74 +11,83 @@
 <style>__CSS__</style>
 </head>
 <body>
-<div id="app">
+<div id="app" class="empty">
   <div id="topbar">
-    <button id="btnOpen" class="icon" title="開啟 RAW">＋</button>
+    <button id="btnOpen" class="icon" aria-label="開啟照片" data-icon="open"></button>
     <input id="fileInput" type="file" multiple accept=".arw,.nef,.nrw,.raf,.dng,.cr2,.cr3,.orf,.rw2,.pef,.srw,.x3f,.3fr,.iiq,.rwl,.raw,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif,.tif,.tiff,.json" style="display:none">
-    <div class="title"><b id="fname">RAW Editor</b> <span id="finfo"></span></div>
-    <button id="btnUndo" class="icon" title="復原 (Ctrl+Z)" disabled>↶</button>
-    <button id="btnRedo" class="icon" title="重做 (Ctrl+Shift+Z)" disabled>↷</button>
-    <button id="btnCompare" class="icon" title="按住看原圖，雙擊切換分割檢視">◐</button>
-    <button id="btnFilm" class="icon" title="底片條">▤</button>
-    <button id="btnExport" class="primary" title="匯出 JPEG / TIFF" disabled>匯出</button>
-    <button id="btnMenu" class="icon" title="更多">⋯</button>
+    <div class="title"><b id="fname">RAW Editor</b><span id="finfo"></span></div>
+    <button id="btnUndo" class="icon" aria-label="復原 (Ctrl+Z)" title="復原 (Ctrl+Z)" data-icon="undo" disabled></button>
+    <button id="btnRedo" class="icon desk" aria-label="重做 (Ctrl+Shift+Z)" title="重做 (Ctrl+Shift+Z)" data-icon="redo" disabled></button>
+    <button id="btnCompare" class="icon" aria-label="比較：按住看原圖，雙擊切換分割" title="按住看原圖，雙擊切換分割檢視" data-icon="compare"></button>
+    <button id="btnFilm" class="icon desk" aria-label="底片條" title="底片條" data-icon="filmstrip"></button>
+    <button id="btnExport" class="primary" data-icon="export" data-label="匯出" disabled>匯出</button>
+    <button id="btnMenu" class="icon" aria-label="更多" title="更多" data-icon="more"></button>
   </div>
   <div id="viewwrap">
     <div id="stage">
     <canvas id="view"></canvas>
     <img id="thumbimg" alt="">
     <canvas id="overlay"></canvas>
-    <canvas id="histo" width="320" height="140"></canvas>
+    <canvas id="histo" width="320" height="140" aria-label="直方圖，點一下切換剪裁警告"></canvas>
     <div id="zoomlbl"></div>
-    <div id="status"></div>
+    <div id="status" role="status"></div>
     <div id="drop">
+      <img class="logo" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23121214'/%3E%3Ccircle cx='50' cy='50' r='30' fill='none' stroke='%234f8cff' stroke-width='9'/%3E%3Ccircle cx='50' cy='50' r='11' fill='%23ffb34f'/%3E%3C/svg%3E" alt="">
       <h1>RAW Editor</h1>
-      <p>純瀏覽器 RAW 修圖。支援 Sony ARW、Nikon NEF、Fujifilm RAF（含 X-Trans）、Ricoh DNG、iPhone ProRAW 等 1200+ 機型，也能修 JPEG／HEIC／PNG。檔案不會離開你的裝置。</p>
+      <p>在瀏覽器裡修 RAW。支援 Sony、Nikon、Fujifilm、Ricoh、iPhone ProRAW 等 1200 多款相機，也能修 JPEG、HEIC、PNG。</p>
+      <p class="privacy">檔案不會離開你的裝置。</p>
       <button class="big primary" id="btnOpen2">選擇照片</button>
-      <p class="hint" id="iosHint" style="display:none">iPhone：RAW 檔請選「選擇檔案」。「照片圖庫」只會給 JPEG。</p>
-      <p>桌機可直接把檔案拖進來。同名的 .json 設定檔會一併套用。</p>
+      <p class="hint" id="iosHint" style="display:none">iPhone：RAW 檔請選「選擇檔案」，「照片圖庫」只會給 JPEG。</p>
+      <p class="hint">桌機可以直接把檔案拖進來。同名的 .json 設定檔會一併套用。</p>
       <p id="caps" class="hint"></p>
     </div>
     </div>
     <div id="filmstrip" class="hidden"></div>
   </div>
   <div id="side">
-    <div id="tabs"></div>
+    <div class="grab" id="grab" aria-label="拖曳調整面板高度"></div>
+    <div id="tabs" role="tablist"></div>
+    <div id="subtabs" class="seg full" role="tablist"></div>
     <div id="panel"></div>
   </div>
+  <div id="toolbar" role="tablist"></div>
 </div>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <div id="modalExport" class="modal"><div class="sheet">
   <h3>匯出</h3>
-  <div class="field"><span>格式</span><select id="expFmt"><option value="jpeg">JPEG（8 位元，檔案小）</option><option value="tiff">TIFF 16 位元（無損，可再後製）</option><option value="png">PNG 16 位元（無損）</option></select></div>
+  <div class="seg full" id="expFmtSeg"></div>
+  <div class="field" style="display:none"><span>格式</span><select id="expFmt"><option value="jpeg">JPEG（8 位元，檔案小）</option><option value="tiff">TIFF 16 位元（無損，可再後製）</option><option value="png">PNG 16 位元（無損）</option></select></div>
   <div class="field"><span>尺寸</span><select id="expSize"><option value="full">全尺寸（重新全解析度解碼）</option><option value="4000">長邊 4000 px</option><option value="2560">長邊 2560 px</option><option value="preview">預覽尺寸（最快）</option></select></div>
-  <div class="field" id="expQRow"><span>品質</span><input id="expQ" type="number" min="50" max="100" value="92" style="min-width:80px"></div>
-  <div class="field"><span>去馬賽克品質（全尺寸）</span><select id="expDemosaic"><option value="auto">自動（Bayer AHD / X-Trans 快速）</option><option value="0">快速（線性）</option><option value="3">高品質 AHD</option><option value="11">DHT（X-Trans 高品質，慢）</option></select></div>
-  <div class="field"><span>寫入 EXIF（相機、鏡頭、曝光）</span><input id="expExif" type="checkbox" checked></div>
+  <div class="field" id="expQRow"><span>品質</span><input id="expQ" type="number" min="50" max="100" value="92" inputmode="numeric" style="min-width:80px"></div>
+  <div class="field"><span>全尺寸去馬賽克</span><select id="expDemosaic"><option value="auto">自動（Bayer AHD / X-Trans 快速）</option><option value="0">快速（線性）</option><option value="3">高品質 AHD</option><option value="11">DHT（X-Trans 高品質，慢）</option></select></div>
+  <div class="field"><span>寫入拍攝資訊（EXIF）</span><input id="expExif" type="checkbox" checked></div>
   <div class="field"><span>套用到</span><select id="expScope"><option value="cur">目前照片</option><option value="all">全部已開啟的照片</option></select></div>
-  <div class="hint">全尺寸會重新以完整解析度解碼（24MP 約需 400 MB 記憶體，40MP 約 700 MB）。手機建議選「長邊 4000 px」，速度快且記憶體安全；成品會寫入 EXIF，檔案不會離開裝置。</div>
+  <div class="hint">全尺寸會重新以完整解析度解碼，24MP 約需 400 MB 記憶體。手機建議選「長邊 4000 px」，速度快也比較不會當掉。檔案不會離開你的裝置。</div>
   <div class="progress"><div id="expBar"></div></div>
   <div class="hint" id="expMsg"></div>
-  <div class="toolbar" style="justify-content:flex-end"><button id="expCancel">取消</button><button id="expGo" class="primary">開始匯出</button></div>
+  <div class="actions split"><button id="expCancel">取消</button><button id="expGo" class="primary">開始匯出</button></div>
 </div></div>
 <div id="modalMenu" class="modal"><div class="sheet">
-  <h3>更多</h3>
+  <h3>更多 <button id="menuClose" class="icon" aria-label="關閉" data-icon="close"></button></h3>
+  <div class="toolbar mobileonly"><button id="mRedo" data-icon="redo" data-label="重做">重做</button><button id="mFilm" data-icon="filmstrip" data-label="底片條">底片條</button></div>
+  <div class="hdr"><span>設定</span></div>
   <div class="toolbar">
-    <button id="mSaveJson">儲存設定 (.json)</button>
-    <button id="mLoadJson">載入設定 (.json)</button>
     <button id="mCopy">複製設定</button>
     <button id="mPaste">貼上設定</button>
-    <button id="mPasteAll">貼到全部照片</button>
-    <button id="mReset">重設此照片</button>
+    <button id="mPasteAll">貼到全部</button>
+    <button id="mSaveJson">儲存設定檔</button>
+    <button id="mLoadJson">載入設定檔</button>
+    <button id="mReset" class="danger">重設此照片</button>
   </div>
-  <div class="hdr">預設集檔案</div>
+  <div class="hdr"><span>預設集檔案</span></div>
   <div class="toolbar"><button id="mExportPresets">匯出我的預設集</button><button id="mImportPresets">匯入預設集</button></div>
-  <div class="hdr">顯示</div>
-  <div class="field"><span>高品質預覽拖曳（較慢）</span><input id="optHQ" type="checkbox"></div>
+  <div class="hdr"><span>外觀</span></div>
+  <div class="seg full" id="themeSeg"><button data-theme="dark">深色</button><button data-theme="light">淺色（戶外）</button></div>
+  <div class="field"><span>拖曳時也用高品質預覽（較慢）</span><input id="optHQ" type="checkbox"></div>
   <div class="field"><span>顯示直方圖</span><input id="optHist" type="checkbox" checked></div>
-  <div class="hdr">關於</div>
+  <div id="menuInfo"></div>
+  <div class="hdr"><span>關於</span></div>
   <div class="info" id="about"></div>
-  <div class="toolbar" style="justify-content:flex-end"><button id="menuClose" class="primary">關閉</button></div>
 </div></div>
 <script type="text/plain" id="workersrc">__WORKER__</script>
 <script type="module">

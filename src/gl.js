@@ -221,7 +221,7 @@ class Renderer {
     const gl = this.gl; const R = this.result; if (!R) return;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0.09, 0.09, 0.1, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    const bg = this.bgColor || [0.043, 0.043, 0.043]; gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.bindVertexArray(this.vao); gl.useProgram(this.progDisp.p);
     gl.uniformMatrix3fv(this.progDisp.u.u_view, false, view);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, R.tex); gl.uniform1i(this.progDisp.u.u_tex, 0);

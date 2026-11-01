@@ -5,11 +5,11 @@ const strip = s => s.replace(/^export\s*\{[^}]*\};?\s*$/mg, '').replace(/^import
 const glue = src('vendor/libraw.mjs').replace(/export default Module;?\s*$/, '').replace(/import\.meta\.url/g, 'self.location.href');
 const worker = glue + '\n' + src('lensmeta.js') + '\n' + src('nikonfast.js') + '\n' + src('worker.js');
 const wasm = fs.readFileSync(path.join(__dirname, 'src/vendor/libraw.wasm')).toString('base64');
-const main = ['shaders.js', 'presets.js', 'curve.js', 'jpeg.js', 'tiff.js', 'png.js', 'gl.js', 'imgdecode.js', 'filmluts.js', 'app.js'].map(f => `// ===== ${f} =====\n` + strip(src(f))).join('\n');
+const main = ['icons.js', 'shaders.js', 'presets.js', 'curve.js', 'jpeg.js', 'tiff.js', 'png.js', 'gl.js', 'imgdecode.js', 'filmluts.js', 'app.js'].map(f => `// ===== ${f} =====\n` + strip(src(f))).join('\n');
 // guard against accidental </script> sequences inside inlined code
 const safe = s => s.replace(/<\/script/gi, '<\\/script');
 let html = src('index.html');
-html = html.replace('__CSS__', () => src('style.css')).replace('__WORKER__', () => safe(worker)).replace('"__WASM__"', () => '"' + wasm + '"').replace('__MAIN__', () => safe(main));
+html = html.replace('__CSS__', () => src('tokens.css') + '\n' + src('style.css')).replace('__WORKER__', () => safe(worker)).replace('"__WASM__"', () => '"' + wasm + '"').replace('__MAIN__', () => safe(main));
 const out = path.join(__dirname, 'RawEditor.html');
 fs.writeFileSync(out, html);
 console.log('wrote', out, (fs.statSync(out).size / 1048576).toFixed(2), 'MB');
