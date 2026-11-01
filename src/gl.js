@@ -31,6 +31,7 @@ class Renderer {
     this.emptyBrush = this._tex2D(gl.RGBA8, 1, 1, gl.NEAREST, gl.CLAMP_TO_EDGE);
     // film emulation LUTs (3D textures, keyed by id); a 1x1x1 placeholder keeps the sampler complete when none is used
     this.luts = new Map();
+    this.camLut = null; // {tex,size}: camera colour LUT of the photo being rendered
     this.emptyLut = gl.createTexture(); gl.bindTexture(gl.TEXTURE_3D, this.emptyLut);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); gl.bindTexture(gl.TEXTURE_3D, null);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
@@ -128,6 +129,19 @@ class Renderer {
     this.blur = from; this.blurB = to;
   }
   // rgb: Uint8Array size^3*3, red fastest (index = (b*size + g)*size + r)
+  // camera colour LUT (Float32 RGB, size^3, red fastest) or null; replaces the previous one
+  setCamLUT(rgb, size) {
+    const gl = this.gl; if (this.camLut && this.camLut.data === rgb) return;
+    if (this.camLut) gl.deleteTexture(this.camLut.tex); this.camLut = null; if (!rgb) return;
+    const tex = gl.createTexture(); gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_3D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB16F, size, size, size, 0, gl.RGB, gl.FLOAT, rgb);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindTexture(gl.TEXTURE_3D, null); gl.activeTexture(gl.TEXTURE0);
+    this.camLut = { tex, size, data: rgb };
+  }
   setFilmLUT(id, size, rgb) {
     const gl = this.gl; if (this.luts.has(id)) return;
     const tex = gl.createTexture(); gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, tex);
@@ -196,6 +210,8 @@ class Renderer {
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, (U.useBrush && this.brush) ? this.brush.tex : this.emptyBrush); gl.uniform1i(u.u_brush, 3);
     { const L = U.lutId ? this.luts.get(U.lutId) : null; gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, L ? L.tex : this.emptyLut); gl.uniform1i(u.u_lut, 4);
       gl.uniform1f(u.u_lutAmt, L ? Math.max(0, Math.min(1, U.lutAmt)) : 0); gl.uniform1f(u.u_lutN, L ? L.size : 2); }
+    { const L = this.camLut; gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_3D, L ? L.tex : this.emptyLut); gl.uniform1i(u.u_camLut, 5);
+      gl.uniform1f(u.u_camLutAmt, L ? Math.max(0, Math.min(1, U.camLutAmt || 0)) : 0); gl.uniform1f(u.u_camLutN, L ? L.size : 2); }
     gl.activeTexture(gl.TEXTURE0);
   }
   // Render the developed image (geometry G: {outW,outH,m}) into a result texture. quality<1 renders smaller.

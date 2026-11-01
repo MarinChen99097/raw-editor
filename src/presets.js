@@ -11,7 +11,7 @@ const DEFAULTS = ({
   // camera calibration: shadow tint and red/green/blue primary hue & saturation
   calib: { shadow: 0, rh: 0, rs: 0, gh: 0, gs: 0, bh: 0, bs: 0 },
   // profile: base rendering + slider deltas applied under the user's sliders (see PROFILES in app.js); amount 0..200 %
-  profile: 'color', profileAmt: 100,
+  profile: 'color', profileAmt: 100, camColor: 0,
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
   clarity: 0, dehaze: 0, texture: 0, fade: 0, vignette: 0, vigMid: 50, vigFeather: 50, grain: 0, grainSize: 25,
   sharpen: 25, sharpenRadius: 1, nrLum: 0, nrColor: 15,

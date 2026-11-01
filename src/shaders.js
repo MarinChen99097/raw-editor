@@ -87,6 +87,8 @@ uniform sampler2D u_blur;       // blurred perceptual luminance of full image
 uniform sampler2D u_curve;      // 256x1 RGBA16F: r=RGB curve, g/b/a = R/G/B curves
 uniform sampler2D u_brush;      // brush masks, one per channel (normalised full-image coords)
 uniform highp sampler3D u_lut;  // film emulation 3D LUT, display-referred sRGB in and out
+uniform highp sampler3D u_camLut; // this photo's camera colour (fitted to its embedded JPEG), sRGB in and out
+uniform float u_camLutAmt, u_camLutN;
 uniform float u_lutAmt, u_lutN;  // strength 0..1, LUT size per axis
 uniform mat3  u_calib;          // camera calibration: primaries hue/saturation in linear RGB (white preserving)
 uniform float u_shadowTint;     // calibration shadow tint: -1 green .. +1 magenta
@@ -415,6 +417,10 @@ void main(){
 
   // --- output encode ---
   vec3 e = srgbOETF(c);
+  if(u_camLutAmt > 0.001){ // camera colour: what is left between the sliders and the camera's JPEG (skin, foliage, skies)
+    vec3 q = clamp(e, 0.0, 1.0)*((u_camLutN - 1.0)/u_camLutN) + 0.5/u_camLutN;
+    e = mix(e, texture(u_camLut, q).rgb, u_camLutAmt);
+  }
   if(u_lutAmt > 0.001){ // film emulation: user sliders act first, then the image goes 'through the film'; R/G/B curves and grain follow
     vec3 q = clamp(e, 0.0, 1.0)*((u_lutN - 1.0)/u_lutN) + 0.5/u_lutN;
     e = mix(e, texture(u_lut, q).rgb, u_lutAmt);
