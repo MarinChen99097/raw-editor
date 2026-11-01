@@ -60,7 +60,8 @@ iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接
   - 預設只是幫你把曝光、對比、HSL、曲線、色調分級等滑桿拉好，套用後每個滑桿都能再調。換別的預設會取代、不會疊加，手動調過的滑桿會保留；「強度」可調 0–150%。
   - 數值來自 GitHub 上的 Lightroom／darktable／RawTherapee 預設檔、富士官方說明、Fuji X Weekly 和中日文調色教學，換算方式與每個預設的出處見 [PRESETS.md](PRESETS.md)。都是外觀近似，不是相機實測。
 - 自訂預設集可匯出／匯入 JSON
-- RAW 匯入後從相機 JPEG 的色調開始：自動比對 RAW 檔內嵌的相機 JPEG，調好曝光、對比、亮部、暗部、白色、黑色、色溫、色調、飽和度，再逐格比對顏色、調整照片裡有出現的 HSL 色相（相機對天空、紅色等各色的處理），數值都看得到。「重設此照片」和各區塊的「重設」會回到這個對齊後的起點；把單一滑桿歸零則是原始 RAW 的值。描述檔旁的「相機色調」可重新套用，「更多」裡可關閉
+- 比這版 LibRaw 新的相機（例如 Nikon Z5 II、Z50 II，共 110 款）沒有色彩矩陣時，改用 darktable／rawspeed 的矩陣換算，避免整張褪色、膚色偏灰綠
+- RAW 匯入後從相機 JPEG 的色調開始：自動比對 RAW 檔內嵌的相機 JPEG，調好曝光、對比、亮部、暗部、白色、黑色、色溫、色調、飽和度，再逐格比對顏色、調整照片裡有出現的 HSL 色相（相機對天空、紅色等各色的處理，膚色加重比對）與鏡頭暗角，數值都看得到。「重設此照片」和各區塊的「重設」會回到這個對齊後的起點；把單一滑桿歸零則是原始 RAW 的值。描述檔旁的「相機色調」可重新套用，「更多」裡可關閉
 - 復原／重做、按住比較原圖、雙擊比較鈕進入左右分割檢視
 - 手機操作：8 個工具在底部工具列，面板可拉高／收合；按住照片看原圖、左右滑動換下一張；上下滑動面板不會動到滑桿（要左右拖才會改數值，單點也不會改），滑桿點兩下歸零、點數值可直接輸入，桌機可用方向鍵微調（Shift ×10）
 - 深色與淺色（戶外）兩種外觀，在「更多」裡切換
@@ -111,5 +112,7 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。本程式其餘部分 MIT。
 
 部分修圖演算法（基礎色調、描述檔、自動調整、污點修復、紅眼、灰塵偵測、Upright、自動拉直、天空／主體遮罩）改編自 LightCraft，Copyright (c) 2026 ArtCraft Team and the LightCraft contributors，MIT License。AI 主體遮罩在使用時才下載：onnxruntime-web（MIT）與 U²-Net-P 權重（Apache-2.0，rembg 的 ONNX 匯出為 MIT），不包含在本 repo 裡。
+
+`src/cammatrix.js` 的相機色彩矩陣取自 rawspeed（darktable）的 `data/cameras.xml`（LGPL-2.1），數值為 Adobe DNG Converter 的 ColorMatrix，以 `tools/make_cam_matrices.py` 產生。
 
 膠片模擬的 LUT 資料不屬於本專案的 MIT 授權：大部分改編自 RawTherapee Film Simulation Collection，依 CC BY-SA 4.0 釋出；Gold 200 來自 t3mujinpack（MIT），經典正片風來自 FilmSim（CC0）。詳見 [FILM_LUTS.md](FILM_LUTS.md)。

@@ -241,11 +241,11 @@ const needsCamLook = im => camLookOn && !im.file._isImage && !im.edited && !im.l
 const LOOK_GW = 40; // colour grid columns (rows follow the aspect ratio)
 // OkLab statistics of an RGBA8 image: lightness quantiles, mean a/b, chroma spread; with gw/gh also a block-averaged L/a/b grid
 function lookStats(px, w = 0, h = 0, gw = 0, gh = 0) {
-  const n = px.length >> 2, Ls = new Float32Array(n); let sa = 0, sb = 0, saa = 0;
+  const n = px.length >> 2, Ls = new Float32Array(n); let sa = 0, sb = 0, saa = 0, clip = 0;
   const lin = SRGB8_TO_LIN || (SRGB8_TO_LIN = Float32Array.from({ length: 256 }, (_, i) => { const c = i / 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }));
   const grid = gw ? new Float32Array(gw * gh * 4) : null; // L, a, b, count
   for (let i = 0, j = 0; j < n; i += 4, j++) {
-    const r = lin[px[i]], g = lin[px[i + 1]], b = lin[px[i + 2]];
+    const r = lin[px[i]], g = lin[px[i + 1]], b = lin[px[i + 2]]; if (px[i] >= 250 || px[i + 1] >= 250 || px[i + 2] >= 250) clip++;
     const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b), s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
     const A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s, B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s, L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
     Ls[j] = L; sa += A; sb += B; saa += A * A + B * B;
@@ -253,16 +253,30 @@ function lookStats(px, w = 0, h = 0, gw = 0, gh = 0) {
   }
   if (grid) for (let k = 0; k < grid.length; k += 4) { const c = grid[k + 3] || 1; grid[k] /= c; grid[k + 1] /= c; grid[k + 2] /= c; }
   Ls.sort(); const ma = sa / n, mb = sb / n;
-  return { q: LOOK_Q.map(f => Ls[Math.round(f * (n - 1))]), a: ma, b: mb, c: Math.sqrt(Math.max(0, saa / n - ma * ma - mb * mb)), grid };
+  return { q: LOOK_Q.map(f => Ls[Math.round(f * (n - 1))]), a: ma, b: mb, c: Math.sqrt(Math.max(0, saa / n - ma * ma - mb * mb)), grid, clip: clip / n };
 }
 let SRGB8_TO_LIN = null;
 // lightness: quantiles (robust to small framing differences); colour: cell by cell when the two images line up, otherwise
 // mean cast + chroma spread (the spread alone is fooled by fine colour detail and noise, so cells are preferred)
+// clipping: a channel at the top where the JPEG kept detail costs a lot (lifting mid-tones with exposure would otherwise
+// push bright, saturated areas — a yellow wall, a white dress — to flat white; the camera's curve keeps a shoulder there)
+const clipResidual = (o, t) => Math.max(0, o.clip - t.clip - 0.002) * 400;
+// skin and other warm/pink tones in the JPEG (hue around 20 deg, +-45, moderate chroma) weigh 3x per cell: faces are small,
+// but a face that turns grey-green is what people notice first
+function skinWeights(grid) {
+  const w = new Float32Array(grid.length / 4);
+  for (let k = 0; k < grid.length; k += 4) {
+    const L = grid[k], a = grid[k + 1], b = grid[k + 2], C = Math.hypot(a, b), h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
+    const dh = Math.abs(((h - 20 + 540) % 360) - 180), mh = dh < 45 ? 1 : dh < 65 ? (65 - dh) / 20 : 0;
+    w[k / 4] = 1 + 2 * (C > 0.008 && C < 0.14 && L > 0.3 && L < 0.92 ? mh : 0);
+  }
+  return w;
+}
 function lookResidual(o, t, aligned) {
-  const r = o.q.map((v, i) => (v - t.q[i]) * 100);
+  const r = o.q.map((v, i) => (v - t.q[i]) * 100); r.push(clipResidual(o, t));
   if (!aligned) { r.push((o.a - t.a) * 250, (o.b - t.b) * 250, (o.c - t.c) * 250); return r; }
-  const g = o.grid, h = t.grid, w = 250 / Math.sqrt(g.length / 4);
-  for (let k = 0; k < g.length; k += 4) r.push((g[k + 1] - h[k + 1]) * w, (g[k + 2] - h[k + 2]) * w);
+  const g = o.grid, h = t.grid, w = 250 / Math.sqrt(g.length / 4), wL = 100 / Math.sqrt(g.length / 4), sw = t.sw;
+  for (let k = 0; k < g.length; k += 4) { const e = sw ? sw[k / 4] : 1; r.push((g[k] - h[k]) * wL * e, (g[k + 1] - h[k + 1]) * w * e, (g[k + 2] - h[k + 2]) * w * e); }
   return r;
 }
 function gridCorrL(a, b) { // Pearson correlation of the lightness grids (tone-independent alignment check)
@@ -296,7 +310,8 @@ function smallSource(src, maxW) {
 // Levenberg–Marquardt on slider values. K: [path, min, max, finite-difference step, prior scale]; evalAt(th) -> residuals.
 // A prior pulls every slider toward 0 so the fit prefers small, natural values. The Jacobian (one render per slider) is
 // refreshed at most `jac` times; up to three steps reuse each one (the sliders are close to linear over a few steps).
-async function lmFit(K, evalAt, isStale, jac) {
+// Past `deadline` (performance.now) it stops and keeps the best values so far, so a slow phone never waits long.
+async function lmFit(K, evalAt, isStale, jac, deadline = Infinity) {
   const P = K.map(k => 0.5 / k[4]);
   const cost = (r, th) => r.reduce((a, v) => a + v * v, 0) + th.reduce((a, v, i) => a + (P[i] * v) ** 2, 0);
   let th = K.map(() => 0), r = evalAt(th), C = cost(r, th), lambda = 0.01, n = 0;
@@ -306,6 +321,7 @@ async function lmFit(K, evalAt, isStale, jac) {
       const h = K[i][3] * (th[i] + K[i][3] > K[i][2] ? -1 : 1), t2 = th.slice(); t2[i] += h;
       const r2 = evalAt(t2); for (let k = 0; k < r.length; k++) J[k][i] = (r2[k] - r[k]) / h;
       if (++n % 3 === 0) { await new Promise(res => setTimeout(res, 0)); if (isStale()) return null; }
+      if (performance.now() > deadline) return th;
     }
     const JtJ = th.map((_, a) => th.map((_, b) => { let s = 0; for (const row of J) s += row[a] * row[b]; return s + (a === b ? P[a] * P[a] : 0); }));
     let gain = 0;
@@ -320,6 +336,7 @@ async function lmFit(K, evalAt, isStale, jac) {
       }
       if (!ok) break;
       if (isStale()) return null;
+      if (performance.now() > deadline) return th;
     }
     if (gain < 0.01) break;
   }
@@ -332,7 +349,10 @@ function hslBandW(h, i) {
   const d = ((h - c + 540) % 360) - 180, t = Math.min(1, Math.abs(d) / (d < 0 ? dPrev : dNext)); return 0.5 + 0.5 * Math.cos(t * Math.PI);
 }
 const zeroHSL = () => ({ h: new Array(8).fill(0), s: new Array(8).fill(0), l: new Array(8).fill(0) });
-function clearCameraLook(p) { for (const [k] of LOOK_KEYS) p[k] = 0; p.hsl = zeroHSL(); }
+function clearCameraLook(p) { for (const [k] of LOOK_KEYS) p[k] = 0; p.hsl = zeroHSL(); p.lens = Object.assign({}, p.lens, { manVig: 0 }); }
+// put fitted values into params: plain keys, hsl replaced, lens merged (only manVig is part of the look)
+function mergeLook(p, v) { for (const [k, x] of Object.entries(v)) p[k] = k === 'lens' ? Object.assign({}, p.lens, x) : clone(x); return p; }
+const setLookKey = (p, k, v) => { const [a, b] = k.split('.'); if (b) { p[a] = Object.assign({}, p[a]); p[a][b] = v; } else p[a] = v; };
 // fit the camera look for im; src = a decoded source that is not on screen (batch export), otherwise the current preview is used.
 // isStale() lets the caller abandon the fit (user switched photos). Returns the fitted values or null.
 // Stage 1: the global sliders (LOOK_KEYS). Stage 2, when the JPEG lines up with our rendering: the HSL sliders of the colour
@@ -346,18 +366,19 @@ async function fitCameraLook(im, src, isStale = () => false) {
     if (bm.width < 64 || bm.height < 32) { bm.close(); return null; }
   } catch (e) { console.warn('camera look: no usable embedded JPEG', e); return null; }
   if (isStale()) { bm.close(); return null; }
-  const swap = !!src;
+  const swap = !!src, t0 = performance.now(); // time budget: global sliders ~6 s, HSL until ~9 s (headless tests take 1-6 s)
   if (swap) { const s = smallSource(src, 512); renderer.setSource(s.data, s.w, s.h, s.scale, src.w * src.scale, src.h * src.scale); }
   const FW = swap ? src.w * src.scale : im.fullW, FH = swap ? src.h * src.scale : im.fullH, imx = swap ? Object.assign({}, im, { fullW: FW, fullH: FH }) : im;
   const base = clone(im.params), G = geometry(base.geo, FW, FH);
   renderer.setCurveLUT(curveLUTFor(base));
   const ow = 192, oh = Math.max(8, Math.round(192 * G.outH / G.outW)), gw = LOOK_GW, gh = Math.max(4, Math.round(LOOK_GW * G.outH / G.outW));
   const statsFor = p => { const U = uniformsFromParams(p, imx, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, ow, 'look'); return lookStats(r.px, r.w, r.h, gw, gh); };
-  const with1 = th => { const p = Object.assign({}, base); LOOK_KEYS.forEach(([k], i) => p[k] = th[i]); return p; };
+  let K1 = LOOK_KEYS;
+  const with1 = th => { const p = Object.assign({}, base); K1.forEach(([k], i) => setLookKey(p, k, th[i])); return p; };
   try {
     // the embedded JPEG may be stored unrotated (portrait shots) or with another crop: try the orientations that fit the output's
     // aspect and keep the one whose lightness lines up best; colour is compared cell by cell only when it lines up well
-    const plain = statsFor(with1(LOOK_KEYS.map(() => 0)));
+    const plain = statsFor(with1(K1.map(() => 0)));
     const swapAR = (bm.width > bm.height) !== (G.outW > G.outH), arJ = swapAR ? bm.height / bm.width : bm.width / bm.height;
     let target = null, best = -2;
     for (const rot of swapAR ? [90, 270] : [0, 180]) {
@@ -367,30 +388,32 @@ async function fitCameraLook(im, src, isStale = () => false) {
       if (corr > best) { best = corr; target = t; }
     }
     const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
+    target.sw = skinWeights(target.grid);
     const info = { corr: +best.toFixed(3), aligned, bands: [] }; fitCameraLook.last = info;
-    const th1 = await lmFit(LOOK_KEYS, th => lookResidual(statsFor(with1(th)), target, aligned), isStale, 7);
+    if (aligned) K1 = [...LOOK_KEYS, ['lens.manVig', -100, 100, 8, 40]];
+    const th1 = await lmFit(K1, th => lookResidual(statsFor(with1(th)), target, aligned), isStale, 7, t0 + 6000);
     if (!th1) return null;
-    const vals = {}; LOOK_KEYS.forEach(([k], i) => vals[k] = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]));
+    const vals = {}; K1.forEach(([k], i) => { const v = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]); if (k === 'lens.manVig') vals.lens = { manVig: v }; else vals[k] = v; });
     vals.hsl = zeroHSL();
-    if (!aligned) return vals;
-    // stage 2: bands that cover at least 3 % of the photo (chroma-weighted, as the shader applies HSL)
-    const p1 = Object.assign({}, base, vals), s1 = statsFor(p1), cells = s1.grid.length / 4, act = new Array(8).fill(0);
+    if (!aligned || performance.now() > t0 + 7500) return vals;
+    // stage 2: bands that cover at least 1 % of the photo (chroma-weighted as the shader applies HSL; skin cells count 3x)
+    const p1 = mergeLook(Object.assign({}, base), vals), s1 = statsFor(p1), cells = s1.grid.length / 4, act = new Array(8).fill(0);
     for (let k = 0; k < s1.grid.length; k += 4) {
       const a = s1.grid[k + 1], b = s1.grid[k + 2], C = Math.hypot(a, b); if (C < 0.005) continue;
       const h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360, wC = Math.min(1, C / 0.06);
-      for (let i = 0; i < 8; i++) act[i] += hslBandW(h, i) * wC / cells;
+      for (let i = 0; i < 8; i++) act[i] += hslBandW(h, i) * wC * target.sw[k / 4] / cells;
     }
-    const bands = act.map((v, i) => v >= 0.03 ? i : -1).filter(i => i >= 0); info.bands = bands;
+    const bands = act.map((v, i) => v >= 0.01 ? i : -1).filter(i => i >= 0); info.bands = bands;
     if (!bands.length) return vals;
-    const hp = 20, K2 = []; for (const i of bands) K2.push([`h.${i}`, -50, 50, 8, hp], [`s.${i}`, -60, 60, 8, hp], [`l.${i}`, -50, 50, 8, hp]);
+    const hp = 20, K2 = []; for (const i of bands) K2.push([`h.${i}`, -50, 50, 8, hp], [`s.${i}`, -60, 100, 8, hp], [`l.${i}`, -50, 50, 8, hp]);
     const with2 = th => { const p = Object.assign({}, p1, { hsl: zeroHSL() }); K2.forEach(([q], i) => { const [c, b] = q.split('.'); p.hsl[c][+b] = th[i]; }); return p; };
     const wL = 100 / Math.sqrt(cells), wab = 250 / Math.sqrt(cells);
     const res2 = o => {
-      const r = o.q.map((v, i) => (v - target.q[i]) * 100), g = o.grid, t = target.grid;
-      for (let k = 0; k < g.length; k += 4) r.push((g[k] - t[k]) * wL, (g[k + 1] - t[k + 1]) * wab, (g[k + 2] - t[k + 2]) * wab);
+      const r = o.q.map((v, i) => (v - target.q[i]) * 100), g = o.grid, t = target.grid; r.push(clipResidual(o, target));
+      for (let k = 0; k < g.length; k += 4) { const e = target.sw[k / 4]; r.push((g[k] - t[k]) * wL * e, (g[k + 1] - t[k + 1]) * wab * e, (g[k + 2] - t[k + 2]) * wab * e); }
       return r;
     };
-    const th2 = await lmFit(K2, th => res2(statsFor(with2(th))), isStale, 2);
+    const th2 = await lmFit(K2, th => res2(statsFor(with2(th))), isStale, 2, t0 + 9000);
     if (!th2) return null;
     K2.forEach(([q], i) => { const [c, b] = q.split('.'); vals.hsl[c][+b] = Math.round(th2[i]); });
     return vals;
@@ -402,10 +425,10 @@ async function fitCameraLook(im, src, isStale = () => false) {
 }
 // the photo's starting point: defaults plus the fitted camera look. Every 「重設」 (photo, section) returns here, like
 // Lightroom's reset to the import defaults; double-tapping a single slider still sets that slider to 0.
-function startingParams(im) { const p = clone(defaultsFor(im)); if (im.look && camLookOn) Object.assign(p, clone(im.look)); return p; }
+function startingParams(im) { const p = clone(defaultsFor(im)); if (im.look && camLookOn) mergeLook(p, im.look); return p; }
 // apply fitted values as the photo's starting point (not an edit: history starts here, the photo is not marked edited)
 function applyCameraLook(im, vals) {
-  im.params = Object.assign(clone(im.params), clone(vals)); im.look = vals; // a copy: editing the HSL sliders must not change the saved look
+  im.params = mergeLook(clone(im.params), vals); im.look = vals; // a copy: editing the HSL sliders must not change the saved look
   im.hist = [JSON.stringify(im.params)]; im.hi = 0;
 }
 // 「相機色調」 button: fit again on the current photo (e.g. after resetting), as a normal undoable edit
@@ -417,7 +440,7 @@ async function cameraLookButton() {
   const keep = clone(im.params); clearCameraLook(im.params);
   const vals = await fitCameraLook(im, null); status('');
   if (!vals) { im.params = keep; toast('無法比對相機 JPEG', 3000, { kind: 'err' }); return; }
-  Object.assign(im.params, clone(vals)); im.look = vals; im.presetId = null; refreshAll(); commit();
+  mergeLook(im.params, vals); im.look = vals; im.presetId = null; refreshAll(); commit();
   toast('已套用相機 JPEG 的色調');
 }
 function camLookToast(im) {

@@ -186,6 +186,16 @@ float bandW(float h, int i){
   float t = clamp(abs(d)/span, 0.0, 1.0);
   return 0.5 + 0.5*cos(t*3.14159265);                 // raised cosine, partitions unity
 }
+// Bring a colour whose brightest channel is over 1 back into range. Saturated colours first give up part of their brightness
+// with the channel ratios kept (a sunlit yellow wall or pink skin stays coloured, as camera JPEGs keep it), and only the rest
+// is desaturated toward grey g. Neutral highlights are not darkened (sat ~ 0), they still go to white.
+vec3 gamutHi(vec3 c, float g){
+  float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+  float k = pow(mx, -0.7*clamp((mx - mn)/mx, 0.0, 1.0));
+  c *= k; g *= k; mx *= k;
+  if(mx > 1.0){ float t = clamp((mx - 1.0)/max(mx - g, 1e-6), 0.0, 1.0); c += (vec3(g) - c)*t; }
+  return c;
+}
 float invSmooth(float x){ return 0.5 - sin(asin(1.0 - 2.0*clamp(x,0.0,1.0))/3.0); }
 
 void main(){
@@ -298,7 +308,7 @@ void main(){
       float o = min(y*(1.0 + y/(wl*wl))/(1.0 + y), 1.0);
       c *= o/Yb;
       float mx = max(c.r, max(c.g, c.b));
-      if(mx > 1.0){ float t = clamp((mx - 1.0)/max(mx - o, 1e-6), 0.0, 1.0); c += (vec3(o) - c)*t; }
+      if(mx > 1.0) c = gamutHi(c, o);
     } else c = vec3(0.0);
   }
   // --- tone (perceptual luminance domain, ratio preserving) ---
@@ -337,7 +347,7 @@ void main(){
   c *= ratio;
   {
     float mx = max(c.r, max(c.g, c.b));
-    if(mx > 1.0){ float Ln = dot(c,LUMA); float k = clamp((mx-1.0)/max(mx-Ln, 1e-4), 0.0, 1.0); c = mix(c, vec3(min(Ln, mx)), k*0.85); }
+    if(mx > 1.0) c = gamutHi(c, min(dot(c,LUMA), 1.0));
   }
 
   // --- colour (OkLab/OkLCh) ---

@@ -2,6 +2,21 @@
 // Protocol (main -> worker):  {id, cmd:'init', wasm:ArrayBuffer}
 //                             {id, cmd:'decode', buffer:ArrayBuffer, name, opts:{half, quality, wantThumb}}
 //           (worker -> main): {id, ok:true, ...result} | {id, ok:false, error} | {id, progress:string}
+// dcraw's cam_xyz_coeff: XYZ->camera matrix (x10000, D65) -> camera->linear sRGB, rows normalised so camera white stays white
+function rgbCamFromXyz(m) {
+  const xyzRgb = [[0.412453, 0.357580, 0.180423], [0.212671, 0.715160, 0.072169], [0.019334, 0.119193, 0.950227]];
+  const a = [0, 1, 2].map(i => [0, 1, 2].map(j => (m[i * 3] * xyzRgb[0][j] + m[i * 3 + 1] * xyzRgb[1][j] + m[i * 3 + 2] * xyzRgb[2][j]) / 1e4));
+  for (const r of a) { const s = r[0] + r[1] + r[2]; r[0] /= s; r[1] /= s; r[2] /= s; }
+  const [[p, q, r], [s, t, u], [v, w, x]] = a, d = p * (t * x - u * w) - q * (s * x - u * v) + r * (s * w - t * v);
+  return [[(t * x - u * w) / d, (r * w - q * x) / d, (q * u - r * t) / d], [(u * v - s * x) / d, (p * x - r * v) / d, (r * s - p * u) / d], [(s * w - t * v) / d, (q * v - p * w) / d, (p * t - q * s) / d]];
+}
+function applyRgbCam(d, k) { // in place on 16-bit RGB, clipped like LibRaw
+  const [a, b, c] = k[0], [e, f, g] = k[1], [h, i, j] = k[2];
+  for (let o = 0; o < d.length; o += 3) {
+    const R = d[o], G = d[o + 1], B = d[o + 2];
+    d[o] = Math.max(0, Math.min(65535, a * R + b * G + c * B)); d[o + 1] = Math.max(0, Math.min(65535, e * R + f * G + g * B)); d[o + 2] = Math.max(0, Math.min(65535, h * R + i * G + j * B));
+  }
+}
 let M = null;
 const post = (m, t) => self.postMessage(m, t || []);
 const cstr = p => { let s = ''; const h = M.HEAPU8; for (let i = p; h[i]; i++) s += String.fromCharCode(h[i]); return s; };
@@ -113,6 +128,17 @@ self.onmessage = async (e) => {
         post({ id, progress: '解包感光元件資料…' });
         chk(M._libraw_unpack(lr), 'unpack');
         out.timings.unpack = performance.now() - t; t = performance.now();
+        out.meta.black = M._libraw_get_black(lr); out.meta.maximum = M._libraw_get_color_maximum(lr);
+        out.meta.rgbCam = [0, 1, 2].map(i => [0, 1, 2].map(j => +M._libraw_get_rgb_cam(lr, i, j).toFixed(4)));
+        out.meta.camXyz = [0, 1, 2].map(i => [0, 1, 2].map(j => +M._libraw_get_cam_xyz(lr, i, j).toFixed(4)));
+        // a body newer than this LibRaw build has no matrix: LibRaw then outputs raw camera RGB (washed out, skin grey-green).
+        // Use rawspeed's matrix for it and convert after processing, exactly as LibRaw's convert_to_rgb would.
+        let fixCam = null;
+        if (out.meta.camXyz.every(r => r.every(v => v === 0))) {
+          const m = EXTRA_CAM_XYZ[(out.meta.make || '').toLowerCase() + '|' + (out.meta.model || '').replace(/\s+/g, '').toLowerCase()];
+          if (m) { fixCam = rgbCamFromXyz(m); out.meta.colorMatrix = 'rawspeed'; out.meta.rgbCam = fixCam.map(r => r.map(v => +v.toFixed(4))); }
+          else out.meta.colorMatrix = 'none';
+        }
         post({ id, progress: opts.half ? '產生預覽…' : '去馬賽克（全尺寸）…' });
         chk(M._libraw_dcraw_process(lr), 'process');
         out.timings.process = performance.now() - t; t = performance.now();
@@ -158,6 +184,7 @@ self.onmessage = async (e) => {
             }
           }
         }
+        if (fixCam) applyRgbCam(data, fixCam);
         out.timings.copy = performance.now() - t;
         out.width = opts.memImage ? w : ow; out.height = opts.memImage ? h : oh; out.data = data; out.scale = opts.half && !(fullOut && !down) ? 2 : 1;
         out.timings.total = performance.now() - t0;

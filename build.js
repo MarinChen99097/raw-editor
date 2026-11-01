@@ -3,7 +3,7 @@ const fs = require('fs'), path = require('path');
 const src = p => fs.readFileSync(path.join(__dirname, 'src', p), 'utf8');
 const strip = s => s.replace(/^export\s*\{[^}]*\};?\s*$/mg, '').replace(/^import\s.*$/mg, '');
 const glue = src('vendor/libraw.mjs').replace(/export default Module;?\s*$/, '').replace(/import\.meta\.url/g, 'self.location.href');
-const worker = glue + '\n' + src('lensmeta.js') + '\n' + src('nikonfast.js') + '\n' + src('worker.js');
+const worker = glue + '\n' + src('lensmeta.js') + '\n' + src('nikonfast.js') + '\n' + src('cammatrix.js') + '\n' + src('worker.js');
 const wasm = fs.readFileSync(path.join(__dirname, 'src/vendor/libraw.wasm')).toString('base64');
 const main = ['icons.js', 'shaders.js', 'presets.js', 'curve.js', 'jpeg.js', 'tiff.js', 'png.js', 'gl.js', 'imgdecode.js', 'filmluts.js', 'app.js'].map(f => `// ===== ${f} =====\n` + strip(src(f))).join('\n');
 // guard against accidental </script> sequences inside inlined code
