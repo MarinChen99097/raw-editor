@@ -10,6 +10,7 @@ function lensSourcePts(T, x, y, W, H) {
   const L = lensAtJS(T, Math.hypot(qx, qy) / R);
   return [[cx + qx * L[0], cy + qy * L[0]], [cx + qx * L[0] * L[2], cy + qy * L[0] * L[2]], [cx + qx * L[0] * L[3], cy + qy * L[0] * L[3]]];
 }
+const DL_OFF = 4; // log2 luminance offset of the D-Lighting base (keeps I^2 small for half floats)
 class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -21,6 +22,15 @@ class Renderer {
     this.progLum = this._prog(VS_QUAD, FS_LUM);
     this.progBlur = this._prog(VS_QUAD, FS_BLUR);
     this.progMain = this._prog(VS_QUAD, FS_MAIN);
+    this.progLLum = this._prog(VS_QUAD, FS_LLUM); this.progLBox = this._prog(VS_QUAD, FS_LBOX); this.progLCoef = this._prog(VS_QUAD, FS_LCOEF);
+    // D-Lighting needs half-float render targets; without them the slider has no effect
+    this.floatRT = !!gl.getExtension('EXT_color_buffer_float');
+    this.lbase = null;  // {tex,fb,w,h}: guided filter coefficients (see buildLocal)
+    // base resolution (long edge), radii (fraction of the long edge; the larger is capped at 64 px), edge threshold (log2 units^2).
+    // Large and only mildly edge-aware, like the camera's: a face framed by dark hair is lifted while the hair stays deep (an
+    // edge-true base did the opposite and flattened the hair); tuned on the camera JPEGs (eps 0.25 / 8 %: D-Lighting fitted 0-20,
+    // no gain; eps 16 / 8-17 %: fitted 43-64, cell error 2.41 -> 2.30 and 2.61 -> 2.44, faces lighter)
+    this.dlOpts = { size: 384, r1: 0.08, r2: 0.3, eps: 16 };
     this.progDisp = this._prog(VS_QUAD, FS_DISPLAY);
     const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
     const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
@@ -28,6 +38,7 @@ class Renderer {
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     this.vao = vao;
     this.curveTex = this._tex2D(gl.RGBA16F, 256, 1, gl.LINEAR, gl.CLAMP_TO_EDGE);
+    this.emptyF = this._tex2D(gl.RGBA16F, 1, 1, gl.NEAREST, gl.CLAMP_TO_EDGE);
     this.emptyBrush = this._tex2D(gl.RGBA8, 1, 1, gl.NEAREST, gl.CLAMP_TO_EDGE);
     // film emulation LUTs (3D textures, keyed by id); a 1x1x1 placeholder keeps the sampler complete when none is used
     this.luts = new Map();
@@ -74,6 +85,14 @@ class Renderer {
     const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER); if (st !== gl.FRAMEBUFFER_COMPLETE) throw new Error('FBO incomplete ' + st);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return { tex, fb, w, h, mip };
+  }
+  _fbTexF(w, h) { // RGBA16F render target (filterable)
+    const gl = this.gl; const tex = this._tex2D(gl.RGBA16F, w, h, gl.LINEAR, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (st !== gl.FRAMEBUFFER_COMPLETE) { gl.deleteTexture(tex); gl.deleteFramebuffer(fb); throw new Error('FBO16F incomplete ' + st); }
+    return { tex, fb, w, h };
   }
   _del(o) { if (!o) return; const gl = this.gl; if (o.tex) gl.deleteTexture(o.tex); if (o.fb) gl.deleteFramebuffer(o.fb); }
 
@@ -127,6 +146,24 @@ class Renderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.blur = from; this.blurB = to;
+    this.buildLocal(src);
+  }
+  // D-Lighting base: guided filter (a, b) of log2 luminance at two radii, at <= dlOpts.size px (FS_LLUM / FS_LBOX / FS_LCOEF)
+  buildLocal(src) {
+    const gl = this.gl; this._del(this.lbase); this.lbase = null;
+    if (!this.floatRT) return;
+    const o = this.dlOpts, k = Math.min(1, o.size / Math.max(src.w, src.h)), w = Math.max(16, Math.round(src.w * k)), h = Math.max(16, Math.round(src.h * k));
+    const L = Math.max(w, h), r1 = Math.max(1, Math.round(o.r1 * L)), r2 = Math.min(64, Math.max(2, Math.round(o.r2 * L))), I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    let A, B;
+    try { A = this._fbTexF(w, h); B = this._fbTexF(w, h); } catch (e) { this._del(A); this.floatRT = false; console.warn('D-Lighting off:', e.message); return; }
+    gl.bindVertexArray(this.vao); gl.viewport(0, 0, w, h); gl.activeTexture(gl.TEXTURE0);
+    const pass = (P, from, to, set) => { gl.useProgram(P.p); gl.uniformMatrix3fv(P.u.u_view, false, I3); gl.bindTexture(gl.TEXTURE_2D, from.tex); gl.uniform1i(P.u.u_src || P.u.u_tex, 0); set(P.u); gl.bindFramebuffer(gl.FRAMEBUFFER, to.fb); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); };
+    const box = (from, to, dx, dy) => pass(this.progLBox, from, to, u => { gl.uniform2f(u.u_dir, dx, dy); gl.uniform2i(u.u_rad, r1, r2); });
+    pass(this.progLLum, src, A, u => { gl.uniform2f(u.u_srcSize, src.w, src.h); gl.uniform2f(u.u_outSize, w, h); gl.uniform1f(u.u_off, DL_OFF); });
+    box(A, B, 1, 0); box(B, A, 0, 1);
+    pass(this.progLCoef, A, B, u => gl.uniform1f(u.u_eps, o.eps));
+    box(B, A, 1, 0); box(A, B, 0, 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); this._del(A); this.lbase = B;
   }
   // rgb: Uint8Array size^3*3, red fastest (index = (b*size + g)*size + r)
   // camera colour LUT (Float32 RGB, size^3, red fastest) or null; replaces the previous one
@@ -184,6 +221,8 @@ class Renderer {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex); gl.uniform1i(u.u_src, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.blur.tex); gl.uniform1i(u.u_blur, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.curveTex); gl.uniform1i(u.u_curve, 2);
+    gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, this.lbase ? this.lbase.tex : this.emptyF); gl.uniform1i(u.u_lbase, 6);
+    { const d = this.lbase && U.dl ? U.dl : [0, 0, 0, 0]; gl.uniform4f(u.u_dl, d[0], d[1], DL_OFF, d[3]); }
     gl.uniform2f(u.u_srcSize, src.w, src.h); gl.uniform2f(u.u_srcOrigin, src.originX, src.originY); gl.uniform1i(u.u_srcScale, src.scale);
     gl.uniform2f(u.u_fullSize, src.fullW, src.fullH);
     gl.uniform2f(u.u_outSize, outW, outH); gl.uniformMatrix3fv(u.u_m, false, m);
@@ -258,7 +297,7 @@ class Renderer {
   // bits = 8: onRows(Uint8Array RGBA, rows); bits = 16: onRows(Uint16Array RGB, rows) — rendered as two RGBA8 passes (high/low byte).
   async renderExport(U, G, src, onRows, onProgress, isCancelled, bits = 8) {
     const gl = this.gl;
-    const prev = { src: this.src, blur: this.blur, blurB: this.blurB };
+    const prev = { src: this.src, blur: this.blur, blurB: this.blurB, lbase: this.lbase };
     const fullW = src.w * src.scale, fullH = src.h * src.scale;
     // blurred luminance from a downsampled copy of the source (<= 2048 px)
     const ds = Math.max(1, Math.ceil(Math.max(src.w, src.h) / 2048));
@@ -268,7 +307,7 @@ class Renderer {
     const smallTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, smallTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGB16UI, dw, dh); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dw, dh, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, small);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    this.blur = null; this.blurB = null; this.buildBlur({ tex: smallTex, w: dw, h: dh }); gl.deleteTexture(smallTex);
+    this.blur = null; this.blurB = null; this.lbase = null; this.buildBlur({ tex: smallTex, w: dw, h: dh }); gl.deleteTexture(smallTex);
     const T = Math.min(2048, this.maxTex, this.maxRB), SH = 64, MARGIN = 8;
     const cols = Math.ceil(G.outW / T), rows = Math.ceil(G.outH / SH);
     const out = this._fbTex(T, SH, false);
@@ -324,8 +363,8 @@ class Renderer {
       }
     } finally {
       this._del(out); if (tileTex) gl.deleteTexture(tileTex);
-      this._del(this.blur); this._del(this.blurB);
-      this.src = prev.src; this.blur = prev.blur; this.blurB = prev.blurB;
+      this._del(this.blur); this._del(this.blurB); this._del(this.lbase);
+      this.src = prev.src; this.blur = prev.blur; this.blurB = prev.blurB; this.lbase = prev.lbase;
     }
   }
 }

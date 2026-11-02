@@ -318,7 +318,10 @@ const needsCamLook = im => camLookOn && !im.file._isImage && !im.edited && im.hi
 // top of the recipe factors (PRESETS.md), saturation x1.6, HSL hue x1, saturation x1.2, luminance x0.5 (ours is much
 // stronger). Noise reduction is left at ours (the camera's values are tuned to Adobe's denoiser).
 const LR_BANDS = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'];
-function lookFromCameraSettings(cs) {
+// Nikon Active D-Lighting (MakerNote 0x0022): off, low, normal, high, extra high (1-4), auto -> starting D-Lighting strength
+const ADL_LEVEL = { 0: 0, 1: 15, 3: 30, 5: 45, 7: 60, 8: 65, 9: 70, 10: 75, 11: 80, 65535: 30 };
+function lookFromCameraSettings(camS) {
+  const cs = camS.crd;
   const n = k => { const v = parseFloat(cs[k]); return isFinite(v) ? v : 0; }, r = (v, lo = -100, hi = 100) => clamp(Math.round(v), lo, hi);
   const zone = (h, s, l) => ({ h: ((Math.round(n(h)) % 360) + 360) % 360, s: r(n(s) * 1.3, 0, 100), l: r(n(l)) });
   const dh = n('Dehaze');
@@ -332,24 +335,24 @@ function lookFromCameraSettings(cs) {
       balance: r(n('SplitToningBalance')), blend: 'ColorGradeBlending' in cs ? r(n('ColorGradeBlending'), 0, 100) : 50 },
     // Lightroom's raw default sharpening is 40 where ours is 25
     sharpen: 'Sharpness' in cs ? r(n('Sharpness') * 25 / 40, 0, 150) : DEFAULTS.sharpen, sharpenRadius: clamp(Math.round((n('SharpenRadius') || 1) * 10) / 10, 1, 3),
-    sharpenMask: r(n('SharpenEdgeMasking'), 0, 100), camColor: 0,
+    sharpenMask: r(n('SharpenEdgeMasking'), 0, 100), camColor: 0, dlighting: ADL_LEVEL[camS.adl] ?? 0,
   };
 }
 const camSettingsName = im => im.camSettings && (im.camSettings.pc || im.camSettings.crd.CameraProfile || '相機設定');
 // what the photo starts from: the camera's written settings (once matched to the embedded JPEG, kept in localStorage under
 // rawedit:clook:), else the values fitted to its embedded JPEG (rawedit:look:)
-const CLOOK = 'rawedit:clook2:'; // bump when the conversion or the fit changes: stored looks are fitted again
+const CLOOK = 'rawedit:clook3:'; // bump when the conversion or the fit changes: stored looks are fitted again
 function noteCameraSettings(im, cs) {
   if (!cs || !cs.crd) return; im.camSettings = cs;
   if (im.lookSrc === 'camera') return;
   let st = null; try { st = JSON.parse(localStorage.getItem(CLOOK + im.key) || 'null'); localStorage.removeItem('rawedit:look:' + im.key); } catch { }
-  im.look = st || lookFromCameraSettings(cs.crd); im.lookFitted = !!st; im.lookSrc = 'camera'; im.camLut = null;
+  im.look = st || lookFromCameraSettings(cs); im.lookFitted = !!st; im.lookSrc = 'camera'; im.camLut = null;
 }
 // the base match: the camera settings stay as they are; exposure, white balance and corner brightness are matched to the
 // embedded JPEG (our base rendering is darker than Adobe's and Nikon's; Active D-Lighting and vignette control differ by shot)
 async function fitCameraSettingsLook(im, src, isStale = () => false) {
   if (!im.thumbBlobUrl) return null;
-  const v = await fitCameraLook(im, src, isStale, { cameraLook: lookFromCameraSettings(im.camSettings.crd) });
+  const v = await fitCameraLook(im, src, isStale, { cameraLook: lookFromCameraSettings(im.camSettings) });
   if (!v) return null;
   im.look = v; im.lookFitted = true; im.lookInfo = fitCameraLook.last; try { localStorage.setItem(CLOOK + im.key, JSON.stringify(v)); } catch { }
   return v;
@@ -475,7 +478,7 @@ function hslBandW(h, i) {
 }
 const zeroHSL = () => ({ h: new Array(8).fill(0), s: new Array(8).fill(0), l: new Array(8).fill(0) });
 // every key a camera look can set (fitted: LOOK_KEYS, hsl, camColor, lens.manVig; camera settings: also these) back to the default
-const LOOK_EXTRA = ['vibrance', 'clarity', 'texture', 'dehaze', 'grade', 'sharpen', 'sharpenRadius', 'sharpenMask'];
+const LOOK_EXTRA = ['vibrance', 'clarity', 'texture', 'dehaze', 'grade', 'sharpen', 'sharpenRadius', 'sharpenMask', 'dlighting'];
 function clearCameraLook(p, im) {
   const d = defaultsFor(im); for (const [k] of LOOK_KEYS) p[k] = 0; if (im && im.lookSrc === 'camera') for (const k of LOOK_EXTRA) p[k] = clone(d[k]);
   p.hsl = zeroHSL(); p.camColor = 0; p.lens = Object.assign({}, p.lens, { manVig: 0 });
@@ -599,8 +602,8 @@ function alignJpeg(ourPx, w, h, src, sw, sh) {
 // bands present in the photo, matched cell by cell. Cameras render each hue their own way (greens, skies, reds...), which
 // global temperature / tint / saturation cannot reproduce (Adobe's look tables and darktable's colour LUT play this role).
 // opts.lookVals: only rebuild the camera colour LUT for already fitted values (a photo fitted in an earlier session).
-// opts.cameraLook: values from the camera's written settings; exposure, temperature, tint, highlights, whites and the corners
-// are fitted on top of them, then the skin-relevant HSL bands (skin cells count 3x), and no LUT is made.
+// opts.cameraLook: values from the camera's written settings; exposure, temperature, tint, highlights, whites, D-Lighting and
+// the corners are fitted on top of them, then the skin-relevant HSL bands (skin cells count 3x), and no LUT is made.
 // The LUT comes back as vals._lut (take it with takeLut before storing the values).
 async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   let bm;
@@ -619,7 +622,7 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   renderer.setCurveLUT(curveLUTFor(base));
   const ow = 192, oh = Math.max(8, Math.round(192 * G.outH / G.outW)), gw = LOOK_GW, gh = Math.max(4, Math.round(LOOK_GW * G.outH / G.outW));
   const statsFor = p => { const U = uniformsFromParams(p, imx, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, ow, 'look'); return lookStats(r.px, r.w, r.h, gw, gh); };
-  const KB = opts.cameraLook ? LOOK_KEYS.filter(k => ['exposure', 'highlights', 'whites', 'temp', 'tint'].includes(k[0])) : LOOK_KEYS; let K1 = KB;
+  const KB = opts.cameraLook ? [...LOOK_KEYS.filter(k => ['exposure', 'highlights', 'whites', 'temp', 'tint'].includes(k[0])), ['dlighting', 0, 100, 8, 100]] : LOOK_KEYS; let K1 = KB;
   const with1 = th => { const p = Object.assign({}, base); K1.forEach(([k], i) => setLookKey(p, k, th[i])); return p; };
   try {
     // the embedded JPEG may be stored unrotated (portrait shots) or with another crop: try the orientations that fit the output's
@@ -717,7 +720,7 @@ async function cameraLookButton() {
   if (im.file._isImage) { toast('JPEG／HEIC 本來就是相機的顏色，不需要這一步'); return; }
   if (im.camSettings) { // the camera wrote its settings: put them back, matched to the JPEG again
     status('比對相機 JPEG 的亮度、白平衡與膚色…'); const v = await fitCameraSettingsLook(im, null); status('');
-    if (CUR() !== im) return; if (!v) { im.look = lookFromCameraSettings(im.camSettings.crd); im.lookFitted = false; }
+    if (CUR() !== im) return; if (!v) { im.look = lookFromCameraSettings(im.camSettings); im.lookFitted = false; }
     clearCameraLook(im.params, im); im.lookSrc = 'camera'; im.camLut = null; renderer.setCamLUT(null, CAM_LUT_N);
     mergeLook(im.params, im.look); im.presetId = null; refreshAll(); commit(); showInfo(); toast('已套用相機寫入的設定：' + camSettingsName(im)); return;
   }
@@ -777,6 +780,8 @@ function baseUniforms(p) {
   return {
     exposure: Math.pow(2, p.exposure), wb,
     contrast: p.contrast / 100, highlights: p.highlights / 100, shadows: p.shadows / 100, whites: p.whites / 100, blacks: p.blacks / 100,
+    // D-Lighting: base contrast around middle grey reduced by up to 60 % (100), highlights at half that
+    dl: [(p.dlighting || 0) / 100 * 0.6, 0.5, 0, 0],
     vibrance: p.vibrance / 100, saturation: p.saturation / 100, hsl, bw: p.bw ? 1 : 0, bwmix: p.bwmix.map(v => v / 100),
     gradeS: g(p.grade.s), gradeM: g(p.grade.m), gradeH: g(p.grade.h), gradeBalance: p.grade.balance / 100,
     clarity: p.clarity / 100, dehaze: p.dehaze / 100, texture: p.texture / 100,
@@ -796,7 +801,7 @@ const TABS = [
   { id: 'local', name: '局部' }, { id: 'heal', name: '修復' }, { id: 'fx', name: '效果' }, { id: 'detail', name: '細節' }, { id: 'lens', name: '鏡頭' }, { id: 'crop', name: '裁切' }, { id: 'presets', name: '預設' }, { id: 'info', name: '資訊' },
 ];
 const SL = {
-  light: [['exposure', '曝光', -5, 5, 0.01, fmt.ev], ['contrast', '對比', -100, 100, 1, fmt.int], ['highlights', '亮部', -100, 100, 1, fmt.int], ['shadows', '暗部', -100, 100, 1, fmt.int], ['whites', '白色', -100, 100, 1, fmt.int], ['blacks', '黑色', -100, 100, 1, fmt.int]],
+  light: [['exposure', '曝光', -5, 5, 0.01, fmt.ev], ['contrast', '對比', -100, 100, 1, fmt.int], ['highlights', '亮部', -100, 100, 1, fmt.int], ['shadows', '暗部', -100, 100, 1, fmt.int], ['whites', '白色', -100, 100, 1, fmt.int], ['blacks', '黑色', -100, 100, 1, fmt.int], ['dlighting', '局部提亮（D-Lighting）', 0, 100, 1, fmt.pos]],
   color: [['temp', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3f78ff,#888,#ffb347)'], ['tint', '色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'], ['vibrance', '鮮豔度', -100, 100, 1, fmt.int], ['saturation', '飽和度', -100, 100, 1, fmt.int]],
   fx: [['clarity', '清晰度', -100, 100, 1, fmt.int], ['texture', '紋理', -100, 100, 1, fmt.int], ['dehaze', '去朦朧', -100, 100, 1, fmt.int], ['fade', '褪色（霧面）', 0, 100, 1, fmt.pos], ['vignette', '暈影', -100, 100, 1, fmt.int], ['vigMid', '暈影中點', 0, 100, 1, fmt.pos], ['vigFeather', '暈影羽化', 0, 100, 1, fmt.pos], ['vigRound', '暈影圓度', -100, 100, 1, fmt.int], ['vigHi', '亮部優先', 0, 100, 1, fmt.pos], ['grain', '顆粒', 0, 100, 1, fmt.pos], ['grainSize', '顆粒大小', 0, 100, 1, fmt.pos], ['grainRough', '顆粒粗糙度', 0, 100, 1, fmt.pos]],
   detail: [['sharpen', '銳利化', 0, 150, 1, fmt.pos], ['sharpenRadius', '銳利化半徑', 1, 3, 0.1, fmt.dec], ['sharpenMask', '銳利化遮色（只銳化邊緣）', 0, 100, 1, fmt.pos], ['nrLum', '明度降噪', 0, 100, 1, fmt.pos], ['nrColor', '色彩降噪', 0, 100, 1, fmt.pos]],
@@ -1325,7 +1330,7 @@ function renderHistoryUI() {
 // ---------- selective copy / paste ----------
 // [id, name, param keys, checked by default]
 const COPY_GROUPS = [
-  ['wb', '白平衡', ['temp', 'tint'], true], ['light', '光線', ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks'], true],
+  ['wb', '白平衡', ['temp', 'tint'], true], ['light', '光線', ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting'], true],
   ['presence', '鮮豔度／飽和度', ['vibrance', 'saturation'], true], ['profile', '描述檔／膠片', ['profile', 'profileAmt', 'film'], true],
   ['hsl', 'HSL', ['hsl'], true], ['bw', '黑白', ['bw', 'bwmix'], true], ['curve', '曲線', ['curves', 'pcurve'], true], ['grade', '色調分級', ['grade'], true],
   ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'], true],
@@ -1929,7 +1934,7 @@ const GROUPS = [
   { id: 'geo', name: '幾何', icon: 'crop', tabs: [['crop', '裁切與變形'], ['lens', '鏡頭']] },
 ];
 const GROUP_KEYS = {
-  presets: ['film'], light: ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'profile', 'profileAmt', 'camColor'],
+  presets: ['film'], light: ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting', 'profile', 'profileAmt', 'camColor'],
   color: ['temp', 'tint', 'vibrance', 'saturation', 'hsl', 'pointColors', 'bw', 'bwmix', 'grade', 'calib'], curve: ['curves', 'pcurve'],
   fx: ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'],
   detail: ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], local: ['masks', 'spots'], geo: ['geo', 'lens'],
@@ -2712,7 +2717,7 @@ $('#mPaste').onclick = () => openPasteDialog(false);
 $('#mPasteAll').onclick = () => openPasteDialog(true);
 $('#mReset').onclick = async () => {
   const im = CUR(); if (!im) return; $('#modalMenu').classList.remove('on');
-  if (im.camSettings && !im.look) { im.look = lookFromCameraSettings(im.camSettings.crd); im.lookSrc = 'camera'; im.lookFitted = false; }
+  if (im.camSettings && !im.look) { im.look = lookFromCameraSettings(im.camSettings); im.lookSrc = 'camera'; im.lookFitted = false; }
   if (im.lookSrc === 'camera' && !im.lookFitted && camLookOn && state.previewData && state.previewData.imId === im.id) { status('比對相機 JPEG 的亮度、白平衡與膚色…'); await fitCameraSettingsLook(im, null); status(''); if (CUR() !== im) return; }
   if (!im.look && camLookOn && !im.file._isImage && im.thumbBlobUrl && state.previewData && state.previewData.imId === im.id) {
     status('比對相機 JPEG 的色調…'); const v = await fitCameraLook(Object.assign({}, im, { params: clone(defaultsFor(im)) }), null); status('');

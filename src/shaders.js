@@ -76,6 +76,52 @@ void main(){
   o = vec4(acc,1.0);
 }`;
 
+// D-Lighting base (local tone mapping, like Nikon's Active D-Lighting): a fast guided filter (He et al.) on log2 luminance at
+// low resolution, at two scales. The main pass evaluates base = a*I + b with each pixel's own luminance I (a, b sampled
+// bilinearly), so the base follows edges at full resolution: no halos along hair / sky, smooth inside faces and walls.
+// Pass L1: mean log2 luminance of the source (4x4 samples per texel), offset by u_off so the squares keep half-float precision.
+const FS_LLUM = `#version 300 es
+precision highp float; precision highp usampler2D;
+uniform usampler2D u_src; uniform vec2 u_srcSize, u_outSize; uniform float u_off;
+out vec4 o;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+void main(){
+  vec2 fp = u_srcSize/u_outSize, p0 = floor(gl_FragCoord.xy)*fp; ivec2 sz = ivec2(u_srcSize);
+  float acc = 0.0;
+  for(int j=0;j<4;j++) for(int i=0;i<4;i++){
+    ivec2 q = clamp(ivec2(p0 + (vec2(i,j)+0.5)*fp*0.25), ivec2(0), sz-1);
+    acc += log2(max(dot(vec3(texelFetch(u_src,q,0).rgb)/65535.0, LUMA), 1e-6));
+  }
+  float I = acc/16.0 + u_off;
+  o = vec4(I, I*I, I, I*I);
+}`;
+// Pass L2: separable box filter, radius u_rad.x for .xy and u_rad.y for .zw (texels, edges replicated)
+const FS_LBOX = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex; uniform vec2 u_dir; uniform ivec2 u_rad;
+out vec4 o;
+void main(){
+  ivec2 p = ivec2(gl_FragCoord.xy), sz = textureSize(u_tex, 0), d = ivec2(u_dir); int R = max(u_rad.x, u_rad.y);
+  vec2 s1 = vec2(0.0), s2 = vec2(0.0); float n1 = 0.0, n2 = 0.0;
+  for(int k=-64;k<=64;k++){
+    if(k < -R || k > R) continue;
+    vec4 v = texelFetch(u_tex, clamp(p + d*k, ivec2(0), sz-1), 0);
+    if(abs(k) <= u_rad.x){ s1 += v.xy; n1 += 1.0; }
+    if(abs(k) <= u_rad.y){ s2 += v.zw; n2 += 1.0; }
+  }
+  o = vec4(s1/n1, s2/n2);
+}`;
+// Pass L3: guided filter coefficients a = var/(var+eps), b = mean - a*mean for both scales
+const FS_LCOEF = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex; uniform float u_eps;
+out vec4 o;
+void main(){
+  vec4 m = texelFetch(u_tex, ivec2(gl_FragCoord.xy), 0);
+  float v1 = max(m.y - m.x*m.x, 0.0), v2 = max(m.w - m.z*m.z, 0.0), a1 = v1/(v1 + u_eps), a2 = v2/(v2 + u_eps);
+  o = vec4(a1, m.x - a1*m.x, a2, m.z - a2*m.z);
+}`;
+
 // Pass C: the develop pipeline. Output pixel -> full-image pixel via u_m (mat3), then lens correction to the source.
 const FS_MAIN = `#version 300 es
 precision highp float; precision highp int; precision highp usampler2D;
@@ -84,6 +130,8 @@ uniform vec2  u_srcSize;        // size of u_src texture (texels)
 uniform vec2  u_srcOrigin;      // origin of u_src within the full image (export tiles)
 uniform vec2  u_fullSize;       // full image size in pixels
 uniform sampler2D u_blur;       // blurred perceptual luminance of full image
+uniform sampler2D u_lbase;      // D-Lighting: guided filter coefficients (a, b) at two scales
+uniform vec4  u_dl;             // D-Lighting: strength (0 = off), highlight share, log offset of the base, pivot (EV over 0.18)
 uniform sampler2D u_curve;      // 256x1 RGBA16F: r=RGB curve, g/b/a = R/G/B curves
 uniform sampler2D u_brush;      // brush masks, one per channel (normalised full-image coords)
 uniform highp sampler3D u_lut;  // film emulation 3D LUT, display-referred sRGB in and out
@@ -279,8 +327,17 @@ void main(){
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
 
+  // --- D-Lighting: local exposure from the edge-aware base (dark surroundings lifted, bright ones held back) ---
+  float dlGain = 1.0;
+  if(u_dl.x > 0.001){
+    float Ip = log2(max(dot(c, LUMA)/max(vgain, 1e-4), 1e-6)) + u_dl.z;
+    vec4 ab = texture(u_lbase, srcG/u_fullSize);
+    float bse = 0.5*((ab.x*Ip + ab.y) + (ab.z*Ip + ab.w)) - u_dl.z + log2(max(vgain*u_exposure*dot(u_wb, LUMA)*lMul, 1e-6)) - log2(0.18) - u_dl.w;
+    float d = -bse*(bse < 0.0 ? u_dl.x : u_dl.x*u_dl.y);
+    dlGain = exp2(clamp(d, -1.5, 2.5)*smoothstep(-9.0, -6.0, bse));
+  }
   // --- exposure & white balance ---
-  c *= u_exposure * u_wb * lMul * lwb;
+  c *= u_exposure * u_wb * lMul * lwb * dlGain;
   // --- camera calibration (primaries) + shadow tint ---
   c = max(u_calib * c, 0.0);
   if(abs(u_shadowTint) > 0.001){ float Ls = dot(c, LUMA); c.g *= 1.0 - u_shadowTint*0.3*(1.0 - smoothstep(0.0, 0.18, Ls)); }
@@ -464,4 +521,4 @@ void main(){
   o = a;
 }`;
 
-export { VS_QUAD, FS_LUM, FS_BLUR, FS_MAIN, FS_DISPLAY };
+export { VS_QUAD, FS_LUM, FS_BLUR, FS_LLUM, FS_LBOX, FS_LCOEF, FS_MAIN, FS_DISPLAY };
