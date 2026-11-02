@@ -2826,7 +2826,7 @@ function lookFromCameraSettings(cs) {
 const camSettingsName = im => im.camSettings && (im.camSettings.pc || im.camSettings.crd.CameraProfile || '相機設定');
 // what the photo starts from: the camera's written settings (once matched to the embedded JPEG, kept in localStorage under
 // rawedit:clook:), else the values fitted to its embedded JPEG (rawedit:look:)
-const CLOOK = 'rawedit:clook1:';
+const CLOOK = 'rawedit:clook2:'; // bump when the conversion or the fit changes: stored looks are fitted again
 function noteCameraSettings(im, cs) {
   if (!cs || !cs.crd) return; im.camSettings = cs;
   if (im.lookSrc === 'camera') return;
@@ -3087,8 +3087,8 @@ function alignJpeg(ourPx, w, h, src, sw, sh) {
 // bands present in the photo, matched cell by cell. Cameras render each hue their own way (greens, skies, reds...), which
 // global temperature / tint / saturation cannot reproduce (Adobe's look tables and darktable's colour LUT play this role).
 // opts.lookVals: only rebuild the camera colour LUT for already fitted values (a photo fitted in an earlier session).
-// opts.cameraLook: values from the camera's written settings; only exposure, temperature, tint and the corners are fitted
-// on top of them (skin cells count 3x), and no LUT is made.
+// opts.cameraLook: values from the camera's written settings; exposure, temperature, tint, highlights, whites and the corners
+// are fitted on top of them, then the skin-relevant HSL bands (skin cells count 3x), and no LUT is made.
 // The LUT comes back as vals._lut (take it with takeLut before storing the values).
 async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   let bm;
@@ -3151,6 +3151,27 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
     K1.forEach(([k], i) => { const v = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]); if (k === 'lens.manVig') vals.lens = { manVig: v }; else vals[k] = v; });
     }
     info.ms = Math.round(performance.now() - t0);
+    if (opts.cameraLook && aligned && !isStale()) {
+      // skin: our base renders skin more orange and paler than Nikon's (OkLCh hue ~38 vs ~18 deg on the test photos), and
+      // faces are too small to steer a whole-frame fit. One hue / saturation / luminance shift is added to both the red and the
+      // orange HSL band (skin sits between them; fitted separately they went opposite ways, -56 / +77, and broke skin into red
+      // blotches), fitted to the mean colour of the cells that are skin-coloured in both renderings (weighted to dominate),
+      // with the whole frame cell by cell kept in the residual so other reds and oranges are not dragged along. (A point colour cannot do this: at
+      // that stage skin is nearly neutral, and a white or light blue dress turned cyan with it.)
+      const tg = target.grid, hueOf = (a, b) => (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
+      const isSkin = (g, k) => { const C = Math.hypot(g[k + 1], g[k + 2]), d = Math.abs(((hueOf(g[k + 1], g[k + 2]) - 20 + 540) % 360) - 180); return C > 0.008 && C < 0.14 && g[k] > 0.3 && g[k] < 0.92 && d < 45; };
+      const p2 = mergeLook(Object.assign({}, base), vals), g0 = statsFor(p2).grid, cells = [];
+      for (let k = 0; k < tg.length; k += 4) if (isSkin(tg, k) && isSkin(g0, k)) cells.push(k);
+      if (cells.length >= 6) {
+        const mean = g => { let L = 0, A = 0, B = 0; for (const k of cells) { L += g[k]; A += g[k + 1]; B += g[k + 2]; } return [L, A, B].map(v => v / cells.length); }, mj = mean(tg);
+        const withS = th => { const H = p2.hsl, p = Object.assign({}, p2, { hsl: { h: H.h.slice(), s: H.s.slice(), l: H.l.slice() } }); ['h', 's', 'l'].forEach((c, i) => { for (const b of [0, 1]) p.hsl[c][b] = clamp(H[c][b] + th[i], -100, 100); }); return p; };
+        const resS = th => { const o = statsFor(withS(th)), m = mean(o.grid), r = camResidual(o, target); r.push((m[0] - mj[0]) * 200, (m[1] - mj[1]) * 200, (m[2] - mj[2]) * 200); return r; };
+        const th2 = await lmFit([['skin.h', -40, 40, 8, 100], ['skin.s', -50, 100, 8, 100], ['skin.l', -40, 60, 8, 100]], resS, isStale, 5, t0 + 9000);
+        if (!th2) return null;
+        const pS = withS(th2); for (const c of ['h', 's', 'l']) for (const b of [0, 1]) vals.hsl[c][b] = Math.round(pS.hsl[c][b]);
+        info.skin = th2.map(Math.round); info.skinCells = cells.length; info.ms = Math.round(performance.now() - t0);
+      }
+    }
     if (opts.cameraLook || !aligned || isStale()) return vals;
     // camera colour: a 3D LUT from our rendering with these values to the JPEG, from uniform cells at 256 px. Per colour,
     // so skin, foliage and a light blue dress each land where the camera put them; HSL stays free for the user.
@@ -3183,7 +3204,7 @@ async function cameraLookButton() {
   const im = CUR(); if (!im || !state.previewData || state.previewData.imId !== im.id) return;
   if (im.file._isImage) { toast('JPEG／HEIC 本來就是相機的顏色，不需要這一步'); return; }
   if (im.camSettings) { // the camera wrote its settings: put them back, matched to the JPEG again
-    status('比對相機 JPEG 的亮度與白平衡…'); const v = await fitCameraSettingsLook(im, null); status('');
+    status('比對相機 JPEG 的亮度、白平衡與膚色…'); const v = await fitCameraSettingsLook(im, null); status('');
     if (CUR() !== im) return; if (!v) { im.look = lookFromCameraSettings(im.camSettings.crd); im.lookFitted = false; }
     clearCameraLook(im.params, im); im.lookSrc = 'camera'; im.camLut = null; renderer.setCamLUT(null, CAM_LUT_N);
     mergeLook(im.params, im.look); im.presetId = null; refreshAll(); commit(); showInfo(); toast('已套用相機寫入的設定：' + camSettingsName(im)); return;
@@ -5132,7 +5153,7 @@ async function selectImage(i) {
     healUI.sig = null; healUI.sel = -1; refreshSpotSource(im, true);
     if (r.thumbURL && !im.thumbUrl) { im.thumbUrl = r.thumbURL; updateFilmstrip(); }
     if (r.thumb && !im.thumbBlobUrl) { im.thumbBlobUrl = URL.createObjectURL(new Blob([r.thumb], { type: 'image/jpeg' })); im.thumbUrl = im.thumbBlobUrl; updateFilmstrip(); }
-    if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted && im.thumbBlobUrl) { status('比對相機 JPEG 的亮度與白平衡…'); await fitCameraSettingsLook(im, null, () => seq !== loadSeq); if (seq !== loadSeq) return; }
+    if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted && im.thumbBlobUrl) { status('比對相機 JPEG 的亮度、白平衡與膚色…'); await fitCameraSettingsLook(im, null, () => seq !== loadSeq); if (seq !== loadSeq) return; }
     if (needsCamLook(im) && im.look) { applyCameraLook(im, im.look); refreshAll(); updateUndoButtons(); if (im.lookSrc === 'camera') camLookToast(im); } // camera settings, or fitted in an earlier session
     else if (needsCamLook(im)) {
       status('比對相機 JPEG 的色調…'); const vals = await fitCameraLook(im, null, () => seq !== loadSeq); if (seq !== loadSeq) return;
@@ -5180,7 +5201,7 @@ $('#mPasteAll').onclick = () => openPasteDialog(true);
 $('#mReset').onclick = async () => {
   const im = CUR(); if (!im) return; $('#modalMenu').classList.remove('on');
   if (im.camSettings && !im.look) { im.look = lookFromCameraSettings(im.camSettings.crd); im.lookSrc = 'camera'; im.lookFitted = false; }
-  if (im.lookSrc === 'camera' && !im.lookFitted && camLookOn && state.previewData && state.previewData.imId === im.id) { status('比對相機 JPEG 的亮度與白平衡…'); await fitCameraSettingsLook(im, null); status(''); if (CUR() !== im) return; }
+  if (im.lookSrc === 'camera' && !im.lookFitted && camLookOn && state.previewData && state.previewData.imId === im.id) { status('比對相機 JPEG 的亮度、白平衡與膚色…'); await fitCameraSettingsLook(im, null); status(''); if (CUR() !== im) return; }
   if (!im.look && camLookOn && !im.file._isImage && im.thumbBlobUrl && state.previewData && state.previewData.imId === im.id) {
     status('比對相機 JPEG 的色調…'); const v = await fitCameraLook(Object.assign({}, im, { params: clone(defaultsFor(im)) }), null); status('');
     if (CUR() !== im) return; if (v) { takeLut(im, v); renderer.setCamLUT(im.camLut || null, CAM_LUT_N); im.look = v; saveLook(im); im.lookInfo = fitCameraLook.last; }
@@ -5268,7 +5289,7 @@ async function exportImage(im, o, prog) {
   else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: r.scale || 2 }; noteCameraSettings(im, r.camSettings); }
   else { prog('全解析度解碼，請稍候…', 0.02); const q = o.demosaic === 'auto' ? undefined : +o.demosaic; const r = await decodeFile(im.file, { half: false, quality: q }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 1 }; noteCameraSettings(im, r.camSettings); }
   if (state.cancelExport) return null;
-  if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted) { prog('比對相機 JPEG 的亮度與白平衡…', 0.06); await fitCameraSettingsLook(im, src); }
+  if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted) { prog('比對相機 JPEG 的亮度、白平衡與膚色…', 0.06); await fitCameraSettingsLook(im, src); }
   if (needsCamLook(im) && im.look) { applyCameraLook(im, im.look); params = im.params; }
   else if (needsCamLook(im)) { prog('比對相機 JPEG 的色調…', 0.06); const vals = await fitCameraLook(im, src); if (vals) { takeLut(im, vals); applyCameraLook(im, vals); saveLook(im); } params = im.params; }
   if (im.look && !im.camLut && (params.camColor || 0) > 0 && camLookOn && im.thumbBlobUrl) takeLut(im, await fitCameraLook(im, src, () => false, { lookVals: im.look }));
