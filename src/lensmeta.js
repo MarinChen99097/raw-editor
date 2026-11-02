@@ -91,6 +91,25 @@ function fujiCropMode(ab, jpgOff, jpgLen) {
   } catch { }
   return 0;
 }
+// The look the camera wrote into the file as Lightroom settings (XMP namespace crd:, "camera raw defaults"; Nikon Z) and the
+// Nikon Picture Control name (MakerNote 0x0023: version, name, base) -> { crd: {Name: 'value'}, pc, pcBase } or null
+function readCameraDefaults(ab) {
+  try {
+    const xmp = pickTag(tiffWalk(ab, 0, [0x2bc]), 0x2bc); if (!xmp) return null;
+    const s = new TextDecoder().decode(new Uint8Array(ab, xmp.off, Math.min(xmp.bytes, 1 << 20)));
+    const crd = {}; for (const m of s.matchAll(/crd:(\w+)(?:="([^"]*)"|>([^<]*)<\/crd:\1>)/g)) crd[m[1]] = m[2] ?? m[3];
+    if (!Object.keys(crd).length) return null;
+    const out = { crd };
+    const mn = pickTag(tiffWalk(ab, 0, [0x927c]), 0x927c);
+    if (mn && mn.bytes > 18 && String.fromCharCode(...new Uint8Array(ab, mn.off, 5)) === 'Nikon') {
+      const pc = pickTag(tiffWalk(ab, mn.off + 10, [0x23]), 0x23);
+      const str = (o, n) => String.fromCharCode(...new Uint8Array(ab, o, n)).replace(/\0.*$/s, '').trim();
+      // version "01xx"/"02xx": name at 4, base at 24; "03xx" (Z bodies): name at 8, base at 28 (exiftool PictureControl3)
+      if (pc && pc.bytes >= 48) { const o = str(pc.off, 4) >= '0300' ? 8 : 4; out.pc = str(pc.off + o, 20); out.pcBase = str(pc.off + o + 20, 20); }
+    }
+    return out;
+  } catch (e) { return null; }
+}
 function readLensMeta(ab) {
   try {
     const u8 = new Uint8Array(ab, 0, Math.min(16, ab.byteLength)); const magic = String.fromCharCode(...u8);

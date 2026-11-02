@@ -31,6 +31,12 @@ licence above. It is adapted from the RawTherapee Film Simulation Collection (CC
 FilmSim (CC0 1.0); see FILM_LUTS.md for attribution and terms.
 
 ---
+The lens calibration data in src/lensfun.js (and the copy embedded in RawEditor.html) is NOT covered by the MIT licence
+above. It is extracted from the lensfun database (https://lensfun.github.io/, https://github.com/lensfun/lensfun) by
+tools/make_lensfun.py and is licensed under the Creative Commons Attribution-ShareAlike 3.0 licence (CC BY-SA 3.0,
+https://creativecommons.org/licenses/by-sa/3.0/), as is the lensfun data it comes from.
+
+---
 Portions of the editing algorithms (base tone map, profiles, auto tone / white balance, spot healing, red eye,
 dust detection, Upright, auto straighten, sky / subject masks) are derived from LightCraft
 (https://github.com/storytold/lightcraft), Copyright (c) 2026 ArtCraft Team and the LightCraft contributors,

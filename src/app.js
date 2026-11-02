@@ -135,6 +135,16 @@ function buildLensTable(md, L, W, H) {
       md.knots.forEach((k, i) => { const kk = md.cropf * k; kin.push(kk); cin.push(fd * md.dist[i] / 100 + 1); rin_.push(useCA ? md.caR[i] : 0); bin.push(useCA ? md.caB[i] : 0); kv.push(kk); vv.push(1 - fv * (1 - md.vig[i] / 100)); });
       kd = []; cor = [[], [], []];
       for (let i = 0; i < 16; i++) { const rin = i / 15, m = spline(kin, cin, rin); kd.push(rin / m); cor[1].push(m); cor[0].push(m * (spline(kin, rin_, rin) + 1)); cor[2].push(m * (spline(kin, bin, rin) + 1)); }
+    } else if (md.type === 'lensfun') {
+      // lensfun ptlens: source radius = u (a u^3 + b u^2 + c u + d), u in Hugin units (1 = half the calibration sensor's short
+      // side), kept centre-preserving (/ d); TCA poly3 on the distorted radius; vignetting pa (1 = calibration sensor corner)
+      const [a, b, c] = md.dist || [0, 0, 0], d = 1 - a - b - c, T = useCA && md.tca, V = md.vig;
+      kd = []; cor = [[], [], []]; kv = []; vv = [];
+      for (let i = 0; i < 16; i++) {
+        const r = i / 15, u = r * md.uD, m = 1 + fd * ((((a * u + b) * u + c) * u + d) / d - 1), ud = u * m; kd.push(r); kv.push(r);
+        cor[0].push(m * (T ? (T[4] * ud + T[2]) * ud + T[0] : 1)); cor[1].push(m); cor[2].push(m * (T ? (T[5] * ud + T[3]) * ud + T[1] : 1));
+        const x2 = (r * md.uV) ** 2; vv.push(V ? 1 - fv * (1 - (1 + x2 * (V[0] + x2 * (V[1] + x2 * V[2])))) : 1);
+      }
     } else if (md.type === 'dng') {
       kd = []; cor = [[], [], []]; kv = []; vv = [];
       for (let i = 0; i < 16; i++) {
@@ -161,6 +171,66 @@ function lensFor(im, L) {
   const W = im.fullW || 1, H = im.fullH || 1; const key = JSON.stringify(L) + W + 'x' + H + (im.lensMD ? im.lensMD.type : '-');
   if (im._lensKey !== key) { im._lensKey = key; im._lens = buildLensTable(im.lensMD, L, W, H); }
   return im._lens;
+}
+// ---------- lensfun: lens corrections for files without embedded ones (Nikon, Canon, Pentax...), as darktable / RawTherapee ----------
+// src/lensfun.js (tools/make_lensfun.py, data CC BY-SA 3.0) is inflated on first use. The lens is found by the EXIF lens name:
+// same focal range and maximum aperture, then the most shared words (an FTZ-adapted F lens on a Z body is found the same
+// way); a fixed-lens compact by its camera model. Coefficients are interpolated to the shot's focal length and aperture.
+let LF_DB = null;
+const lensfunDB = () => LF_DB || (LF_DB = (async () => {
+  const bin = Uint8Array.from(atob(LENSFUN_Z), c => c.charCodeAt(0));
+  return JSON.parse(await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'))).text());
+})());
+const LF_MAKER = { om: 'olympus', ricoh: 'pentax', fuji: 'fujifilm' };
+const lfMaker = s => { const w = (s || '').toLowerCase().match(/[a-z]+/); return w ? LF_MAKER[w[0]] || w[0] : ''; };
+const lfModel = (maker, s) => (s || '').toLowerCase().replace(maker, '').replace(/[^a-z0-9]/g, '');
+const lfWords = s => new Set((s || '').toLowerCase().replace(/\d+(\.\d+)?(\s*-\s*\d+(\.\d+)?)?\s*mm|f\s*\/?\s*\d+(\.\d+)?(\s*-\s*\d+(\.\d+)?)?|1:\d+(\.\d+)?(-\d+(\.\d+)?)?/g, ' ').match(/[a-z0-9]+/g) || []);
+function lfRange(s) { // focal range and maximum aperture(s) written in a lens name
+  const f = (s || '').match(/(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?\s*mm/i), a = (s || '').match(/(?:f\s*\/?\s*|1:)(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?/i);
+  return f ? { f0: +f[1], f1: +(f[2] || f[1]), a0: a ? +a[1] : 0 } : null;
+}
+const LF_GENERIC = new Set(['lens', 'zoom', 'af', 's', 'nikkor', 'nikon', 'canon', 'ef', 'sony', 'fe', 'e', 'g', 'di', 'dc', 'hsm', 'if', 'ed', 'asph', 'aspherical', 'mc']);
+function lerpRows(rows, x, n) { // rows sorted by rows[i][0]; linear in x, clamped at the ends; returns the n values after the key
+  if (!rows.length) return null; let i = 0; while (i < rows.length - 1 && rows[i + 1][0] <= x) i++;
+  const A = rows[i], B = rows[Math.min(i + 1, rows.length - 1)], t = B[0] > A[0] ? clamp((x - A[0]) / (B[0] - A[0]), 0, 1) : 0;
+  return A.slice(1, 1 + n).map((v, k) => v + (B[1 + k] - v) * t);
+}
+async function lensfunFor(meta) {
+  if (!meta || !meta.make) return null;
+  let db; try { db = await lensfunDB(); } catch (e) { console.warn('lensfun', e); return null; }
+  const mk = lfMaker(meta.make), cm = lfModel(mk, meta.model);
+  const cam = db.cams.find(c => lfMaker(c[0]) === mk && c[1].some(n => lfModel(mk, n) === cm));
+  const crop = meta.focal35 > 0 && meta.focal > 0 ? meta.focal35 / meta.focal : cam ? cam[3] : 1;
+  let cands;
+  if (cam && cam[2]) cands = db.lenses.filter(l => l[2].includes(cam[2]));
+  else {
+    const name = meta.lens || '', R = lfRange(name) || (meta.minFocal > 0 ? { f0: meta.minFocal, f1: meta.maxFocal, a0: meta.maxApMin } : null); if (!R) return null;
+    const lmk = lfMaker(meta.lensMake), words = lfWords(name), named = db.lenses.map(l => lfMaker(l[0])).filter(m => words.has(m));
+    cands = [];
+    for (const l of db.lenses) {
+      const lm = lfMaker(l[0]); if (named.length ? !named.includes(lm) : lm !== (lmk || mk)) continue;
+      let best = -1e9;
+      for (const n of l[1]) {
+        const q = lfRange(n); if (!q || Math.abs(q.f0 - R.f0) > 0.6 || Math.abs(q.f1 - R.f1) > 0.6 || (R.a0 && q.a0 && Math.abs(q.a0 - R.a0) > 0.11)) continue;
+        const w = lfWords(n); let s = 0; for (const x of words) if (w.has(x)) s += 2; for (const x of w) if (!words.has(x) && !LF_GENERIC.has(x)) s -= 0.5;
+        best = Math.max(best, s);
+      }
+      if (best > -1e9) cands.push([best, l]);
+    }
+    cands.sort((x, y) => y[0] - x[0]); cands = cands.filter(c => c[0] === (cands[0] || [0])[0]).map(c => c[1]);
+  }
+  // several calibrations of the same lens: the one made on the largest sensor that is still no larger than this one's
+  cands = cands.filter(l => l[3] <= crop * 1.05).sort((x, y) => y[3] - x[3]);
+  const l = cands.find(l => l[5].length) || cands[0]; if (!l) return null;
+  const f = meta.focal || (l[5][0] || l[6][0] || l[7][0] || [0])[0];
+  let vig = null;
+  if (l[7].length && meta.aperture > 0) { // pa terms at this focal length and aperture (aperture interpolated in stops)
+    const byF = new Map(); for (const v of l[7]) { if (!byF.has(v[0])) byF.set(v[0], []); byF.get(v[0]).push([Math.log2(v[1]), v[2], v[3], v[4]]); }
+    const rows = [...byF].map(([fv, list]) => [fv, ...lerpRows(list.sort((x, y) => x[0] - y[0]), Math.log2(meta.aperture), 3)]).sort((x, y) => x[0] - y[0]);
+    vig = lerpRows(rows, f, 3);
+  }
+  return { type: 'lensfun', name: l[1][0], dist: lerpRows(l[5], f, 3), tca: lerpRows(l[6], f, 6), vig,
+    uD: l[3] / crop * Math.hypot(l[4], 1), uV: l[3] / crop };
 }
 const MASK_TYPES = { linear: 0, radial: 1, brush: 2, sky: 2, subject: 2, background: 2 }; // 2 = raster (brush texture channel)
 function packMasks(U, masks) {
@@ -237,7 +307,53 @@ const LOOK_KEYS = [
   ['whites', -100, 100, 8, 12], ['blacks', -100, 100, 8, 12], ['temp', -60, 60, 4, 15], ['tint', -60, 60, 4, 15], ['saturation', -100, 100, 6, 30]];
 const LOOK_Q = [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98];
 let camLookOn = true; try { camLookOn = localStorage.getItem('rawedit:camlook') !== '0'; } catch { }
-const needsCamLook = im => camLookOn && !im.file._isImage && !im.edited && im.hist.length === 1 && !!im.thumbBlobUrl && !im.lookApplied;
+const needsCamLook = im => camLookOn && !im.file._isImage && !im.edited && im.hist.length === 1 && !!(im.thumbBlobUrl || im.camSettings) && !im.lookApplied;
+// The camera's own settings, when it wrote them: Nikon Z bodies store the in-camera look (Picture Control or Imaging Recipe,
+// Active D-Lighting, sharpening) in the NEF as Lightroom slider values (XMP namespace crd:, "camera raw defaults"), which
+// Lightroom applies with Raw Defaults = Camera Settings. Those values are exact where fitting to the JPEG has to guess (a
+// recipe turning greens by +44 and darkening them by -58 is out of reach of a fit), so they replace the fit. Lightroom applies
+// them on top of Adobe's camera-matching profile, which renders brighter and more saturated than our base, and its sliders
+// differ in strength; the factors below were fitted against the camera JPEGs (three Z5 II photos, cell-wise OkLab error
+// 10-19 -> 3.2-3.6 together with the per-photo base match in fitCameraLook): contrast x0.4, highlights / shadows x1.4 on
+// top of the recipe factors (PRESETS.md), saturation x1.6, HSL hue x1, saturation x1.2, luminance x0.5 (ours is much
+// stronger). Noise reduction is left at ours (the camera's values are tuned to Adobe's denoiser).
+const LR_BANDS = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'];
+function lookFromCameraSettings(cs) {
+  const n = k => { const v = parseFloat(cs[k]); return isFinite(v) ? v : 0; }, r = (v, lo = -100, hi = 100) => clamp(Math.round(v), lo, hi);
+  const zone = (h, s, l) => ({ h: ((Math.round(n(h)) % 360) + 360) % 360, s: r(n(s) * 1.3, 0, 100), l: r(n(l)) });
+  const dh = n('Dehaze');
+  return {
+    exposure: clamp(Math.round(n('Exposure2012') * 100) / 100, -5, 5), contrast: r(n('Contrast2012') * 0.4), highlights: r(n('Highlights2012') * 0.84), shadows: r(n('Shadows2012') * 1.12),
+    whites: r(n('Whites2012') * 0.6), blacks: r(n('Blacks2012') * 0.6), temp: 0, tint: 0, vibrance: r(n('Vibrance')), saturation: r(n('Saturation') * 1.6),
+    clarity: r(n('Clarity2012')), texture: r(n('Texture')), dehaze: r(dh * (dh > 0 ? 0.8 : 0.5)),
+    hsl: { h: LR_BANDS.map(b => r(n('HueAdjustment' + b))), s: LR_BANDS.map(b => r(n('SaturationAdjustment' + b) * 1.2)), l: LR_BANDS.map(b => r(n('LuminanceAdjustment' + b) * 0.5)) },
+    grade: { s: zone('SplitToningShadowHue', 'SplitToningShadowSaturation', 'ColorGradeShadowLum'), m: zone('ColorGradeMidtoneHue', 'ColorGradeMidtoneSat', 'ColorGradeMidtoneLum'),
+      h: zone('SplitToningHighlightHue', 'SplitToningHighlightSaturation', 'ColorGradeHighlightLum'), g: zone('ColorGradeGlobalHue', 'ColorGradeGlobalSat', 'ColorGradeGlobalLum'),
+      balance: r(n('SplitToningBalance')), blend: 'ColorGradeBlending' in cs ? r(n('ColorGradeBlending'), 0, 100) : 50 },
+    // Lightroom's raw default sharpening is 40 where ours is 25
+    sharpen: 'Sharpness' in cs ? r(n('Sharpness') * 25 / 40, 0, 150) : DEFAULTS.sharpen, sharpenRadius: clamp(Math.round((n('SharpenRadius') || 1) * 10) / 10, 1, 3),
+    sharpenMask: r(n('SharpenEdgeMasking'), 0, 100), camColor: 0,
+  };
+}
+const camSettingsName = im => im.camSettings && (im.camSettings.pc || im.camSettings.crd.CameraProfile || '相機設定');
+// what the photo starts from: the camera's written settings (once matched to the embedded JPEG, kept in localStorage under
+// rawedit:clook:), else the values fitted to its embedded JPEG (rawedit:look:)
+const CLOOK = 'rawedit:clook1:';
+function noteCameraSettings(im, cs) {
+  if (!cs || !cs.crd) return; im.camSettings = cs;
+  if (im.lookSrc === 'camera') return;
+  let st = null; try { st = JSON.parse(localStorage.getItem(CLOOK + im.key) || 'null'); localStorage.removeItem('rawedit:look:' + im.key); } catch { }
+  im.look = st || lookFromCameraSettings(cs.crd); im.lookFitted = !!st; im.lookSrc = 'camera'; im.camLut = null;
+}
+// the base match: the camera settings stay as they are; exposure, white balance and corner brightness are matched to the
+// embedded JPEG (our base rendering is darker than Adobe's and Nikon's; Active D-Lighting and vignette control differ by shot)
+async function fitCameraSettingsLook(im, src, isStale = () => false) {
+  if (!im.thumbBlobUrl) return null;
+  const v = await fitCameraLook(im, src, isStale, { cameraLook: lookFromCameraSettings(im.camSettings.crd) });
+  if (!v) return null;
+  im.look = v; im.lookFitted = true; im.lookInfo = fitCameraLook.last; try { localStorage.setItem(CLOOK + im.key, JSON.stringify(v)); } catch { }
+  return v;
+}
 const LOOK_GW = 40; // colour grid columns (rows follow the aspect ratio)
 // OkLab statistics of an RGBA8 image: lightness quantiles, mean a/b, chroma spread; with gw/gh also a block-averaged L/a/b grid
 function lookStats(px, w = 0, h = 0, gw = 0, gh = 0) {
@@ -279,6 +395,14 @@ function lookResidual(o, t, aligned) {
   // lightness cell by cell only counts fully in the JPEG's mid-tones: in deep shadows the camera's own local lifting
   // (Active D-Lighting, DRO) would otherwise be read as lens vignetting and pull the corner correction up
   for (let k = 0; k < g.length; k += 4) { const e = sw ? sw[k / 4] : 1, m = h[k] > 0.35 && h[k] < 0.88 ? 1 : 0.25; r.push((g[k] - h[k]) * wL * e * m, (g[k + 1] - h[k + 1]) * w * e, (g[k + 2] - h[k + 2]) * w * e); }
+  return r;
+}
+// base match under camera settings: plain OkLab distance cell by cell, skin cells 3x. (No clipping term: counted per channel,
+// it let the fit dodge clipping in bluish whites by turning the white balance warm and green.) (lookResidual's quantile and clipping
+// terms with colour weighted 2.5x pulled a strong recipe's white balance warm: temperature +35, skin and whites yellow.)
+function camResidual(o, t) {
+  const g = o.grid, h = t.grid, sw = t.sw, w = 100 / Math.sqrt(g.length / 4), r = [];
+  for (let k = 0; k < g.length; k += 4) { const e = w * Math.sqrt(sw ? sw[k / 4] : 1); r.push((g[k] - h[k]) * e, (g[k + 1] - h[k + 1]) * e, (g[k + 2] - h[k + 2]) * e); }
   return r;
 }
 function gridCorrL(a, b) { // Pearson correlation of the lightness grids (tone-independent alignment check)
@@ -350,7 +474,12 @@ function hslBandW(h, i) {
   const d = ((h - c + 540) % 360) - 180, t = Math.min(1, Math.abs(d) / (d < 0 ? dPrev : dNext)); return 0.5 + 0.5 * Math.cos(t * Math.PI);
 }
 const zeroHSL = () => ({ h: new Array(8).fill(0), s: new Array(8).fill(0), l: new Array(8).fill(0) });
-function clearCameraLook(p) { for (const [k] of LOOK_KEYS) p[k] = 0; p.hsl = zeroHSL(); p.camColor = 0; p.lens = Object.assign({}, p.lens, { manVig: 0 }); }
+// every key a camera look can set (fitted: LOOK_KEYS, hsl, camColor, lens.manVig; camera settings: also these) back to the default
+const LOOK_EXTRA = ['vibrance', 'clarity', 'texture', 'dehaze', 'grade', 'sharpen', 'sharpenRadius', 'sharpenMask'];
+function clearCameraLook(p, im) {
+  const d = defaultsFor(im); for (const [k] of LOOK_KEYS) p[k] = 0; if (im && im.lookSrc === 'camera') for (const k of LOOK_EXTRA) p[k] = clone(d[k]);
+  p.hsl = zeroHSL(); p.camColor = 0; p.lens = Object.assign({}, p.lens, { manVig: 0 });
+}
 // put fitted values into params: plain keys, hsl replaced, lens merged (only manVig is part of the look)
 function mergeLook(p, v) { for (const [k, x] of Object.entries(v)) p[k] = k === 'lens' ? Object.assign({}, p.lens, x) : clone(x); return p; }
 const setLookKey = (p, k, v) => { const [a, b] = k.split('.'); if (b) { p[a] = Object.assign({}, p[a]); p[a][b] = v; } else p[a] = v; };
@@ -470,6 +599,8 @@ function alignJpeg(ourPx, w, h, src, sw, sh) {
 // bands present in the photo, matched cell by cell. Cameras render each hue their own way (greens, skies, reds...), which
 // global temperature / tint / saturation cannot reproduce (Adobe's look tables and darktable's colour LUT play this role).
 // opts.lookVals: only rebuild the camera colour LUT for already fitted values (a photo fitted in an earlier session).
+// opts.cameraLook: values from the camera's written settings; only exposure, temperature, tint and the corners are fitted
+// on top of them (skin cells count 3x), and no LUT is made.
 // The LUT comes back as vals._lut (take it with takeLut before storing the values).
 async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   let bm;
@@ -484,11 +615,11 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   const FW = swap ? src.w * src.scale : im.fullW, FH = swap ? src.h * src.scale : im.fullH, imx = swap ? Object.assign({}, im, { fullW: FW, fullH: FH }) : im;
   // always compared from the defaults (full frame, nothing else applied): the embedded JPEG is the whole frame, and the user's
   // own edits must not end up inside the camera look or its LUT
-  const base = clone(defaultsFor(im)), G = geometry(base.geo, FW, FH);
+  const base = opts.cameraLook ? mergeLook(clone(defaultsFor(im)), opts.cameraLook) : clone(defaultsFor(im)), G = geometry(base.geo, FW, FH);
   renderer.setCurveLUT(curveLUTFor(base));
   const ow = 192, oh = Math.max(8, Math.round(192 * G.outH / G.outW)), gw = LOOK_GW, gh = Math.max(4, Math.round(LOOK_GW * G.outH / G.outW));
   const statsFor = p => { const U = uniformsFromParams(p, imx, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, ow, 'look'); return lookStats(r.px, r.w, r.h, gw, gh); };
-  let K1 = LOOK_KEYS;
+  const KB = opts.cameraLook ? LOOK_KEYS.filter(k => ['exposure', 'highlights', 'whites', 'temp', 'tint'].includes(k[0])) : LOOK_KEYS; let K1 = KB;
   const with1 = th => { const p = Object.assign({}, base); K1.forEach(([k], i) => setLookKey(p, k, th[i])); return p; };
   try {
     // the embedded JPEG may be stored unrotated (portrait shots) or with another crop: try the orientations that fit the output's
@@ -513,24 +644,26 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
     }
     const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
     const info = { corr: +best.toFixed(3), aligned, align: { s: +al.t.s.toFixed(3), k: al.t.k, dx: al.t.dx, dy: al.t.dy, edge: +al.corr.toFixed(3), edge0: +al.corr0.toFixed(3) } }; fitCameraLook.last = info;
-    if (aligned) K1 = [...LOOK_KEYS, ['lens.manVig', -30, 50, 8, 20]];
+    if (aligned) K1 = [...KB, ['lens.manVig', -30, 50, 8, 20]];
+    if (opts.cameraLook) target.sw = skinWeights(target.grid);
     let vals;
     if (opts.lookVals) vals = clone(opts.lookVals);
     else {
     // start close (median lightness by a secant on exposure, chroma spread by saturation): a fit cut short by the time budget
     // on a slow device then still ends near the JPEG instead of half way from the flat rendering
-    const th0 = K1.map(() => 0), iE = K1.findIndex(k => k[0] === 'exposure'), iS = K1.findIndex(k => k[0] === 'saturation');
+    const th0 = K1.map(([k]) => opts.cameraLook && k in base ? base[k] : 0), iE = K1.findIndex(k => k[0] === 'exposure'), iS = K1.findIndex(k => k[0] === 'saturation');
     { let e0 = 0, m0 = plain.q[3], e1 = 1, m1 = statsFor(with1(th0.map((v, i) => i === iE ? 1 : v))).q[3];
       for (let it = 0; it < 2 && Math.abs(m1 - m0) > 1e-4; it++) { const e2 = clamp(e1 + (target.q[3] - m1) * (e1 - e0) / (m1 - m0), -2, 3); e0 = e1; m0 = m1; e1 = e2; m1 = statsFor(with1(th0.map((v, i) => i === iE ? e1 : v))).q[3]; }
-      th0[iE] = e1; const o = statsFor(with1(th0)); th0[iS] = clamp((target.c / Math.max(o.c, 1e-4) - 1) * 100, -50, 80); }
-    const th1 = await lmFit(K1, th => lookResidual(statsFor(with1(th)), target, aligned), isStale, 7, t0 + 6000, th0);
+      th0[iE] = e1; if (iS >= 0) { const o = statsFor(with1(th0)); th0[iS] = clamp((target.c / Math.max(o.c, 1e-4) - 1) * 100, -50, 80); } }
+    const res = opts.cameraLook && aligned ? camResidual : lookResidual;
+    const th1 = await lmFit(K1, th => res(statsFor(with1(th)), target, aligned), isStale, 7, t0 + 6000, th0);
     info.cut = lmFit.cut;
     if (!th1) return null;
-    vals = {}; K1.forEach(([k], i) => { const v = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]); if (k === 'lens.manVig') vals.lens = { manVig: v }; else vals[k] = v; });
-    vals.hsl = zeroHSL(); vals.camColor = 0;
+    vals = opts.cameraLook ? clone(opts.cameraLook) : { hsl: zeroHSL(), camColor: 0 };
+    K1.forEach(([k], i) => { const v = k === 'exposure' ? Math.round(th1[i] * 100) / 100 : Math.round(th1[i]); if (k === 'lens.manVig') vals.lens = { manVig: v }; else vals[k] = v; });
     }
     info.ms = Math.round(performance.now() - t0);
-    if (!aligned || isStale()) return vals;
+    if (opts.cameraLook || !aligned || isStale()) return vals;
     // camera colour: a 3D LUT from our rendering with these values to the JPEG, from uniform cells at 256 px. Per colour,
     // so skin, foliage and a light blue dress each land where the camera put them; HSL stays free for the user.
     const pL = mergeLook(Object.assign({}, base), vals); pL.camColor = 0;
@@ -561,9 +694,15 @@ function applyCameraLook(im, vals) {
 async function cameraLookButton() {
   const im = CUR(); if (!im || !state.previewData || state.previewData.imId !== im.id) return;
   if (im.file._isImage) { toast('JPEG／HEIC 本來就是相機的顏色，不需要這一步'); return; }
+  if (im.camSettings) { // the camera wrote its settings: put them back, matched to the JPEG again
+    status('比對相機 JPEG 的亮度與白平衡…'); const v = await fitCameraSettingsLook(im, null); status('');
+    if (CUR() !== im) return; if (!v) { im.look = lookFromCameraSettings(im.camSettings.crd); im.lookFitted = false; }
+    clearCameraLook(im.params, im); im.lookSrc = 'camera'; im.camLut = null; renderer.setCamLUT(null, CAM_LUT_N);
+    mergeLook(im.params, im.look); im.presetId = null; refreshAll(); commit(); showInfo(); toast('已套用相機寫入的設定：' + camSettingsName(im)); return;
+  }
   if (!im.thumbBlobUrl) { toast('這個 RAW 檔裡沒有相機 JPEG 預覽，無法比對'); return; }
   status('比對相機 JPEG 的色調…');
-  const keep = clone(im.params); clearCameraLook(im.params);
+  const keep = clone(im.params); clearCameraLook(im.params, im);
   const vals = await fitCameraLook(im, null); status('');
   if (!vals) { im.params = keep; toast('無法比對相機 JPEG', 3000, { kind: 'err' }); return; }
   takeLut(im, vals); renderer.setCamLUT(im.camLut || null, CAM_LUT_N); mergeLook(im.params, vals); im.look = vals; saveLook(im); im.lookInfo = fitCameraLook.last; im.presetId = null; refreshAll(); commit(); showInfo();
@@ -571,7 +710,8 @@ async function cameraLookButton() {
 }
 function camLookToast(im) {
   if (camLookToast.shown) return; camLookToast.shown = true;
-  toast('已從相機 JPEG 的色調開始；這些滑桿歸零就是原始 RAW', 6000, { kind: 'ok', action: { label: '改用原始', fn: () => { if (CUR() !== im) return; clearCameraLook(im.params); im.presetId = null; refreshAll(); commit(); } } });
+  const msg = im.lookSrc === 'camera' ? `已套用相機寫入的設定（${camSettingsName(im)}）；這些滑桿歸零就是原始 RAW` : '已從相機 JPEG 的色調開始；這些滑桿歸零就是原始 RAW';
+  toast(msg, 6000, { kind: 'ok', action: { label: '改用原始', fn: () => { if (CUR() !== im) return; clearCameraLook(im.params, im); im.presetId = null; refreshAll(); commit(); } } });
 }
 
 // ---------- uniforms ----------
@@ -958,12 +1098,12 @@ function buildLensPanel(sec) {
   sec.append(makeSlider('lens.manDist', '扭曲（＋修正桶狀）', -100, 100, 1, fmt.int), makeSlider('lens.manVig', '暗角（＋提亮四角）', -100, 100, 1, fmt.int),
     makeSlider('lens.caR', '色差：紅／青', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3fd0d0,#888,#ff4d4d)'), makeSlider('lens.caB', '色差：藍／黃', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ffe04d,#888,#4d7cff)'),
     makeSlider('lens.defringe', '去紫邊', 0, 100, 1, fmt.pos, 'linear-gradient(90deg,#777,#a35cff)'));
-  sec.append(el('div', { class: 'hint' }, 'Sony、Fujifilm 與帶校正資料的 DNG 會自動讀取相機內嵌的鏡頭描述檔（扭曲、暗角、色差）。Nikon、Ricoh 等沒有內嵌資料的檔案請用手動校正。放大到 100% 檢查邊緣色差最準。'));
+  sec.append(el('div', { class: 'hint' }, 'Sony、Fujifilm 與帶校正資料的 DNG 會自動讀取相機內嵌的鏡頭描述檔（扭曲、暗角、色差）；Nikon、Canon 等沒有內嵌資料的檔案，改從內建的 lensfun 鏡頭資料庫依鏡頭名稱與焦距找。都找不到時請用手動校正。放大到 100% 檢查邊緣色差最準。'));
 }
 function refreshLensUI() {
   if (!lensUI.info) return; const im = CUR(); const L = im ? im.params.lens : DEFAULTS.lens; const md = im && im.lensMD;
-  const names = { sony: 'Sony 內嵌鏡頭描述檔', fuji: 'Fujifilm 內嵌鏡頭描述檔', dng: 'DNG 內嵌校正（OpcodeList）' };
-  lensUI.info.textContent = !im ? '尚未開啟照片。' : md ? `偵測到：${names[md.type]}${im.meta && im.meta.lens ? '（' + im.meta.lens + '）' : ''}` : (im.lensMD === null ? '這個檔案沒有內嵌鏡頭校正資料，請使用下方手動校正。' : '讀取中…');
+  const names = { sony: 'Sony 內嵌鏡頭描述檔', fuji: 'Fujifilm 內嵌鏡頭描述檔', dng: 'DNG 內嵌校正（OpcodeList）', lensfun: 'lensfun 鏡頭資料庫' };
+  lensUI.info.textContent = !im ? '尚未開啟照片。' : md ? `偵測到：${names[md.type]}${md.type === 'lensfun' ? '（' + md.name + '）' : im.meta && im.meta.lens ? '（' + im.meta.lens + '）' : ''}` : (im.lensMD === null ? '這個檔案沒有內嵌鏡頭校正資料，資料庫裡也找不到這支鏡頭，請使用下方手動校正。' : '讀取中…');
   lensUI.auto.textContent = L.auto ? '自動校正：開' : '自動校正：關'; lensUI.auto.classList.toggle('on', !!L.auto); lensUI.auto.disabled = !md;
   lensUI.ca.classList.toggle('on', L.ca !== false); lensUI.ca.disabled = !md || !L.auto;
   lensUI.autoBox.style.opacity = md && L.auto ? '' : '.45'; lensUI.autoBox.style.pointerEvents = md && L.auto ? '' : 'none';
@@ -2460,6 +2600,12 @@ async function addFiles(files) {
   updateFilmstrip();
   if (firstNew >= 0) selectImage(firstNew);
 }
+// metadata of a decode result: lens corrections (embedded in the file, else lensfun) and the settings the camera wrote
+async function takeDecodeMeta(im, r) {
+  im.meta = r.meta; if (im.file._isImage) { im.lensMD = null; return; }
+  noteCameraSettings(im, r.camSettings);
+  im.lensMD = r.lensMD || await lensfunFor(r.meta) || null;
+}
 // thumbnails are extracted one at a time so opening many files does not spawn many workers at once
 const thumbQueue = []; let thumbBusy = false;
 function makeThumb(im) { thumbQueue.push(im); pumpThumbs(); }
@@ -2471,7 +2617,7 @@ async function pumpThumbs() {
 async function makeThumbNow(im) {
   try {
     const r = await decodeFile(im.file, { wantThumb: true, thumbOnly: true });
-    im.meta = r.meta; if (r.lensMD !== undefined) im.lensMD = r.lensMD;
+    await takeDecodeMeta(im, r);
     if (r.thumbURL) { im.thumbUrl = r.thumbURL; if (!im.thumbBlobUrl) im.thumbBlobUrl = URL.createObjectURL(im.file); }
     else if (r.thumb) { const blob = new Blob([r.thumb], { type: 'image/jpeg' }); im.thumbBlobUrl = URL.createObjectURL(blob); try { const bm = await createImageBitmap(blob, { resizeWidth: 240, resizeQuality: 'medium' }); const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0); im.thumbUrl = c.toDataURL('image/jpeg', 0.7); bm.close(); } catch { im.thumbUrl = im.thumbBlobUrl; } }
     updateFilmstrip(); if (CUR() === im) showInfo();
@@ -2490,19 +2636,21 @@ async function selectImage(i) {
     const r = await decodeFile(im.file, { half: true, wantThumb: !im.thumbBlobUrl }, p => { if (seq === loadSeq) status(p); });
     if (seq !== loadSeq) return; // user moved on
     const sc = r.scale || 2;
-    im.meta = r.meta; im.lensMD = r.lensMD ?? null; im.previewW = r.width; im.previewH = r.height; im.previewScale = sc; im.fullW = r.width * sc; im.fullH = r.height * sc;
+    await takeDecodeMeta(im, r); if (seq !== loadSeq) return;
+    im.previewW = r.width; im.previewH = r.height; im.previewScale = sc; im.fullW = r.width * sc; im.fullH = r.height * sc;
     if (im.meta && im.meta.width) { const mw = (im.meta.flip & 4) ? im.meta.height : im.meta.width, mh = (im.meta.flip & 4) ? im.meta.width : im.meta.height; if (Math.abs(mw - im.fullW) <= 2 && Math.abs(mh - im.fullH) <= 2) { im.fullW = mw; im.fullH = mh; } }
     state.previewData = { data: r.data, w: r.width, h: r.height, scale: sc, imId: im.id };
     renderer.setSource(r.data, r.width, r.height, sc, im.fullW, im.fullH);
     healUI.sig = null; healUI.sel = -1; refreshSpotSource(im, true);
     if (r.thumbURL && !im.thumbUrl) { im.thumbUrl = r.thumbURL; updateFilmstrip(); }
     if (r.thumb && !im.thumbBlobUrl) { im.thumbBlobUrl = URL.createObjectURL(new Blob([r.thumb], { type: 'image/jpeg' })); im.thumbUrl = im.thumbBlobUrl; updateFilmstrip(); }
-    if (needsCamLook(im) && im.look) { applyCameraLook(im, im.look); refreshAll(); updateUndoButtons(); } // fitted in an earlier session
+    if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted && im.thumbBlobUrl) { status('比對相機 JPEG 的亮度與白平衡…'); await fitCameraSettingsLook(im, null, () => seq !== loadSeq); if (seq !== loadSeq) return; }
+    if (needsCamLook(im) && im.look) { applyCameraLook(im, im.look); refreshAll(); updateUndoButtons(); if (im.lookSrc === 'camera') camLookToast(im); } // camera settings, or fitted in an earlier session
     else if (needsCamLook(im)) {
       status('比對相機 JPEG 的色調…'); const vals = await fitCameraLook(im, null, () => seq !== loadSeq); if (seq !== loadSeq) return;
       if (vals) { takeLut(im, vals); applyCameraLook(im, vals); saveLook(im); im.lookInfo = fitCameraLook.last; refreshAll(); updateUndoButtons(); camLookToast(im); }
     }
-    if (im.look && !im.camLut && camLookOn && !im.file._isImage && im.thumbBlobUrl) {
+    if (im.look && (im.look.camColor || 0) > 0 && !im.camLut && camLookOn && !im.file._isImage && im.thumbBlobUrl) {
       const v = await fitCameraLook(im, null, () => seq !== loadSeq, { lookVals: im.look }); if (seq !== loadSeq) return; takeLut(im, v);
     }
     renderer.setCamLUT(im.camLut || null, CAM_LUT_N);
@@ -2526,7 +2674,7 @@ function showInfo() {
   const im = CUR(); const box = $('#infobox'); if (!im) { box.textContent = '尚未開啟照片。'; return; } const m = im.meta || {};
   const sh = m.shutter ? (m.shutter >= 1 ? m.shutter.toFixed(1) + 's' : '1/' + Math.round(1 / m.shutter) + 's') : '';
   const dt = m.timestamp ? new Date(m.timestamp * 1000).toLocaleString() : '';
-  box.innerHTML = `<b>${im.name}</b><br>${[m.make, m.model].filter(Boolean).join(' ')}<br>${m.lens || ''}<br>${[m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + m.aperture.toFixed(1) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean).join(' · ')}<br>${dt}<br>${im.fullW ? `尺寸 ${im.fullW}×${im.fullH}` : ''} ${m.kind === 'image' ? '· ' + m.format : m.filters === 9 ? '· X-Trans' : m.filters ? '· Bayer' : m.colors === 3 ? '· 線性 DNG' : ''}<br><span style="font-size:11px">檔案大小 ${(im.file.size / 1048576).toFixed(1)} MB${m.colorMatrix === 'rawspeed' ? ' · 色彩矩陣：rawspeed（LibRaw 未收錄此機型）' : m.colorMatrix === 'none' ? ' · 沒有色彩矩陣' : ''}${im.lookInfo ? ` · 相機色調比對 ${(im.lookInfo.ms / 1000).toFixed(1)} 秒${im.lookInfo.cut ? '（時間不足，提前結束）' : ''}${im.lookInfo.aligned ? '' : '（與 JPEG 對不齊，只比對整體）'}` : ''}</span>`;
+  box.innerHTML = `<b>${im.name}</b><br>${[m.make, m.model].filter(Boolean).join(' ')}<br>${m.lens || ''}<br>${[m.focal ? Math.round(m.focal) + 'mm' : '', m.aperture ? 'f/' + m.aperture.toFixed(1) : '', sh, m.iso ? 'ISO ' + Math.round(m.iso) : ''].filter(Boolean).join(' · ')}<br>${dt}<br>${im.fullW ? `尺寸 ${im.fullW}×${im.fullH}` : ''} ${m.kind === 'image' ? '· ' + m.format : m.filters === 9 ? '· X-Trans' : m.filters ? '· Bayer' : m.colors === 3 ? '· 線性 DNG' : ''}<br><span style="font-size:11px">檔案大小 ${(im.file.size / 1048576).toFixed(1)} MB${m.colorMatrix === 'rawspeed' ? ' · 色彩矩陣：rawspeed（LibRaw 未收錄此機型）' : m.colorMatrix === 'none' ? ' · 沒有色彩矩陣' : ''}${im.camSettings ? ` · 相機設定：${im.camSettings.pc || ''}${im.camSettings.pcBase ? '（' + im.camSettings.pcBase + '）' : ''}` : ''}${im.lookInfo && im.lookSrc !== 'camera' ? ` · 相機色調比對 ${(im.lookInfo.ms / 1000).toFixed(1)} 秒${im.lookInfo.cut ? '（時間不足，提前結束）' : ''}${im.lookInfo.aligned ? '' : '（與 JPEG 對不齊，只比對整體）'}` : ''}</span>`;
 }
 
 // ---------- settings json / clipboard ----------
@@ -2543,12 +2691,14 @@ $('#mPaste').onclick = () => openPasteDialog(false);
 $('#mPasteAll').onclick = () => openPasteDialog(true);
 $('#mReset').onclick = async () => {
   const im = CUR(); if (!im) return; $('#modalMenu').classList.remove('on');
+  if (im.camSettings && !im.look) { im.look = lookFromCameraSettings(im.camSettings.crd); im.lookSrc = 'camera'; im.lookFitted = false; }
+  if (im.lookSrc === 'camera' && !im.lookFitted && camLookOn && state.previewData && state.previewData.imId === im.id) { status('比對相機 JPEG 的亮度與白平衡…'); await fitCameraSettingsLook(im, null); status(''); if (CUR() !== im) return; }
   if (!im.look && camLookOn && !im.file._isImage && im.thumbBlobUrl && state.previewData && state.previewData.imId === im.id) {
     status('比對相機 JPEG 的色調…'); const v = await fitCameraLook(Object.assign({}, im, { params: clone(defaultsFor(im)) }), null); status('');
     if (CUR() !== im) return; if (v) { takeLut(im, v); renderer.setCamLUT(im.camLut || null, CAM_LUT_N); im.look = v; saveLook(im); im.lookInfo = fitCameraLook.last; }
   }
   im.params = startingParams(im); im.presetId = null; refreshAll(); fitView(); commit();
-  toast(im.look && camLookOn ? '已重設為相機 JPEG 的色調' : '已重設這張照片', 5000, { action: { label: '復原', fn: undo } });
+  toast(im.look && camLookOn ? (im.lookSrc === 'camera' ? '已重設為相機寫入的設定' : '已重設為相機 JPEG 的色調') : '已重設這張照片', 5000, { action: { label: '復原', fn: undo } });
 };
 $('#mExportPresets').onclick = () => download(new Blob([JSON.stringify({ app: 'RAW Editor', presets: userPresets }, null, 1)], { type: 'application/json' }), 'raw-editor-presets.json');
 $('#mImportPresets').onclick = () => { const inp = el('input', { type: 'file', accept: '.json' }); inp.onchange = async () => { try { const j = JSON.parse(await inp.files[0].text()); const list = j.presets || (Array.isArray(j) ? j : null); if (!list) throw new Error('格式不符'); for (const p of list) if (p && p.name && p.p) userPresets.push(p); saveUserPresets(); renderPresetGrid(); toast('已匯入 ' + list.length + ' 個預設集'); } catch (e) { toast('匯入失敗：' + e.message); } }; inp.click(); };
@@ -2627,9 +2777,10 @@ async function exportImage(im, o, prog) {
   // choose decode scale: half-size is a true box downsample, good when the target is at most half of the full output
   let src;
   if (target <= longEdge / 2 && state.previewData && state.previewData.imId === im.id) { src = state.previewData; }
-  else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: r.scale || 2 }; }
-  else { prog('全解析度解碼，請稍候…', 0.02); const q = o.demosaic === 'auto' ? undefined : +o.demosaic; const r = await decodeFile(im.file, { half: false, quality: q }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 1 }; }
+  else if (target <= longEdge / 2) { prog('解碼（半尺寸）…', 0.02); const r = await decodeFile(im.file, { half: true }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: r.scale || 2 }; noteCameraSettings(im, r.camSettings); }
+  else { prog('全解析度解碼，請稍候…', 0.02); const q = o.demosaic === 'auto' ? undefined : +o.demosaic; const r = await decodeFile(im.file, { half: false, quality: q }, m => prog(m, 0.05)); src = { data: r.data, w: r.width, h: r.height, scale: 1 }; noteCameraSettings(im, r.camSettings); }
   if (state.cancelExport) return null;
+  if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted) { prog('比對相機 JPEG 的亮度與白平衡…', 0.06); await fitCameraSettingsLook(im, src); }
   if (needsCamLook(im) && im.look) { applyCameraLook(im, im.look); params = im.params; }
   else if (needsCamLook(im)) { prog('比對相機 JPEG 的色調…', 0.06); const vals = await fitCameraLook(im, src); if (vals) { takeLut(im, vals); applyCameraLook(im, vals); saveLook(im); } params = im.params; }
   if (im.look && !im.camLut && (params.camColor || 0) > 0 && camLookOn && im.thumbBlobUrl) takeLut(im, await fitCameraLook(im, src, () => false, { lookVals: im.look }));
@@ -2658,13 +2809,13 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
   try {
     await decoder.init(); const v = decoder.version, n = decoder.cameras; decoder.terminate();
     $('#caps').textContent = `LibRaw ${v} · 支援 ${n} 款相機 · WebGL2 ✓ · 最大材質 ${renderer.maxTex}px` + (IS_TOUCH ? ' · 觸控模式' : '');
-    $('#about').innerHTML = `RAW Editor — 單一 HTML 檔、純瀏覽器運作，不上傳任何資料。<br>解碼：LibRaw ${v}（LGPL 2.1 / CDDL 1.0），WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。<br>調色：WebGL2，OkLab 色彩空間。匯出：內建串流 JPEG 編碼器（4:4:4）。<br>膠片模擬 LUT：改編自 RawTherapee Film Simulation Collection（Pat David、Pavlov Dmitry、Michael Ezra，CC BY-SA 4.0）、t3mujinpack（MIT）、FilmSim（CC0），詳見 FILM_LUTS.md。<br>快捷鍵：Ctrl+Z 復原、Ctrl+Shift+Z 重做、空白鍵/\\ 比較原圖、← → 切換照片、0 符合視窗、滑桿連點兩下重設、Shift 拖曳微調。`;
+    $('#about').innerHTML = `RAW Editor — 單一 HTML 檔、純瀏覽器運作，不上傳任何資料。<br>解碼：LibRaw ${v}（LGPL 2.1 / CDDL 1.0），WebAssembly 建置來自 @colorhythm/libraw-wasm（MIT）。<br>調色：WebGL2，OkLab 色彩空間。匯出：內建串流 JPEG 編碼器（4:4:4）。<br>膠片模擬 LUT：改編自 RawTherapee Film Simulation Collection（Pat David、Pavlov Dmitry、Michael Ezra，CC BY-SA 4.0）、t3mujinpack（MIT）、FilmSim（CC0），詳見 FILM_LUTS.md。<br>鏡頭校正資料庫：lensfun（https://lensfun.github.io/，CC BY-SA 3.0）。<br>快捷鍵：Ctrl+Z 復原、Ctrl+Shift+Z 重做、空白鍵/\\ 比較原圖、← → 切換照片、0 符合視窗、滑桿連點兩下重設、Shift 拖曳微調。`;
   } catch (e) { $('#caps').textContent = '解碼器初始化失敗：' + e.message; console.error(e); }
 })();

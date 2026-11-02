@@ -46,7 +46,7 @@ iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接
 - 曲線：RGB 與 R/G/B 分色曲線，背景顯示直方圖
 - 色調分離：陰影／中間調／亮部各自的色相、飽和度、明度與平衡
 - 局部調整：線性漸層、放射狀、筆刷（畫筆／橡皮擦、大小、羽化、流量），每張最多 8 個遮罩（筆刷最多 4 個）。每個遮罩可調曝光、對比、亮部、暗部、白色、黑色、色溫、色調、飽和度、清晰度、去朦朧、紋理、銳利度，並可用亮度範圍限制、反轉、停用、複製、紅色遮罩預覽（鍵盤 O）
-- 鏡頭校正：自動讀取 Sony、Fujifilm 與 DNG 檔內嵌的鏡頭描述檔（扭曲、暗角、橫向色差，演算法依 darktable），可調校正量；另有手動扭曲、暗角、紅／青與藍／黃色差、去紫邊。Nikon、Ricoh 等沒有內嵌資料的機型用手動
+- 鏡頭校正：自動讀取 Sony、Fujifilm 與 DNG 檔內嵌的鏡頭描述檔（扭曲、暗角、橫向色差，演算法依 darktable），可調校正量；Nikon、Canon 等沒有內嵌資料的檔案，改從內建的 lensfun 鏡頭資料庫（約 1500 支鏡頭）依 EXIF 鏡頭名稱、焦距與光圈找出扭曲、色差與暗角資料，FTZ 轉接的 F 接環鏡頭也找得到；另有手動扭曲、暗角、紅／青與藍／黃色差、去紫邊
 - 效果：清晰度、紋理、去朦朧、褪色（霧面）、暈影、顆粒
 - 細節：銳利化、明度降噪、色彩降噪
 - 裁切：90° 旋轉、翻轉、拉直角度、固定長寬比、拖曳裁切框
@@ -61,7 +61,7 @@ iOS 的「檔案」App 預覽 HTML 時**不會執行 JavaScript**，所以直接
   - 數值來自 GitHub 上的 Lightroom／darktable／RawTherapee 預設檔、富士官方說明、Fuji X Weekly 和中日文調色教學，換算方式與每個預設的出處見 [PRESETS.md](PRESETS.md)。都是外觀近似，不是相機實測。
 - 自訂預設集可匯出／匯入 JSON
 - 比這版 LibRaw 新的相機（例如 Nikon Z5 II、Z50 II，共 110 款）沒有色彩矩陣時，改用 darktable／rawspeed 的矩陣換算，避免整張褪色、膚色偏灰綠
-- RAW 匯入後從相機 JPEG 的色調開始：自動比對 RAW 檔內嵌的相機 JPEG，調好曝光、對比、亮部、暗部、白色、黑色、色溫、色調、飽和度，與鏡頭暗角；剩下的顏色差異（膚色、樹葉、天空各自的處理）用一個從這張照片算出的 3D 色彩查找表補上，顯示為「相機色彩」滑桿（0–100%），HSL 留給你自己調，數值都看得到。「重設此照片」和各區塊的「重設」會回到這個對齊後的起點；把單一滑桿歸零則是原始 RAW 的值。描述檔旁的「相機色調」可重新套用，「更多」裡可關閉
+- RAW 匯入後從相機的色調開始。Nikon Z 機身會把機內的 Picture Control／Imaging Recipe（彈性色彩配方）、動態 D-Lighting、銳利度換成 Lightroom 的滑桿數值寫進 NEF（Lightroom「原始預設 → 相機設定」讀的就是這份），本程式直接讀出來填進曝光、對比、亮部、暗部、飽和度、HSL、色調分級、清晰度、紋理、銳利化等滑桿，數值都看得到、歸零就是原始 RAW。這些數值原本是配 Adobe 的相機描述檔用的，換算倍率用相機 JPEG 校準過（對比 ×0.4、飽和度 ×1.6、HSL 明亮度 ×0.5 等）；每張照片再用內嵌 JPEG 對齊曝光、色溫、色調、亮部、白色與四角亮度（約 1 秒），三張測試照片與相機 JPEG 的平均色差從 16–22 降到 2.4–2.9。相機對臉部的局部提亮（動態 D-Lighting）無法用全域滑桿重現，臉會比 JPEG 暗一點。其他相機則自動比對 RAW 檔內嵌的相機 JPEG，調好曝光、對比、亮部、暗部、白色、黑色、色溫、色調、飽和度，與鏡頭暗角；剩下的顏色差異（膚色、樹葉、天空各自的處理）用一個從這張照片算出的 3D 色彩查找表補上，顯示為「相機色彩」滑桿（0–100%），HSL 留給你自己調，數值都看得到。「重設此照片」和各區塊的「重設」會回到這個對齊後的起點；把單一滑桿歸零則是原始 RAW 的值。描述檔旁的「相機色調」可重新套用，「更多」裡可關閉
 - 復原／重做、按住比較原圖、雙擊比較鈕進入左右分割檢視
 - 手機操作：8 個工具在底部工具列，面板可拉高／收合；按住照片看原圖、左右滑動換下一張；上下滑動面板不會動到滑桿（要左右拖才會改數值，單點也不會改），滑桿點兩下歸零、點數值可直接輸入，桌機可用方向鍵微調（Shift ×10）
 - 深色與淺色（戶外）兩種外觀，在「更多」裡切換
@@ -83,7 +83,8 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 - `src/shaders.js`、`src/gl.js`：WebGL2 調色管線（OkLab 色彩運算、分段匯出）
 - `src/jpeg.js`：串流式 baseline JPEG 編碼器（AAN DCT）＋ EXIF
 - `src/tiff.js`：串流式 16 位元 TIFF 編碼器（deflate＋水平預測）
-- `src/lensmeta.js`：讀取 Sony／Fujifilm／DNG 內嵌鏡頭校正資料（在解碼 worker 內執行）
+- `src/lensmeta.js`：讀取 Sony／Fujifilm／DNG 內嵌鏡頭校正資料，以及 Nikon 寫在 NEF 裡的相機設定（XMP `crd:`）與 Picture Control 名稱（在解碼 worker 內執行）
+- `src/lensfun.js`：lensfun 鏡頭資料庫（壓縮後內嵌，`tools/make_lensfun.py` 產生）
 - `src/nikonfast.js`：Nikon 無損壓縮 NEF 快速解碼
 - `src/app.js`：UI、幾何（旋轉／拉直／裁切）、狀態、匯出流程
 - `src/tokens.css`、`src/style.css`、`src/icons.js`：RAW Editor 設計系統的 token、元件樣式與線條圖示
@@ -105,7 +106,7 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 
 **AI 主體／背景**：第一次使用時會從網路下載 onnxruntime-web（約 1.8 MB）和 U²-Net-P 模型（約 4.6 MB），之後存在瀏覽器裡離線可用。運算全部在你的裝置上，照片不會上傳。iPhone 上單執行緒運算約 2–5 秒。沒有網路時會改用一般演算法。
 
-**還沒有做的**：AI 降噪、超解析度、鏡頭模糊（景深）、人物部位與點選物件的 AI 遮罩、HDR／全景合併、內容感知填補、Lightroom 的鏡頭描述檔資料庫。
+**還沒有做的**：AI 降噪、超解析度、鏡頭模糊（景深）、人物部位與點選物件的 AI 遮罩、HDR／全景合併、內容感知填補、Adobe 的相機配對描述檔與鏡頭描述檔（LCP）。
 
 ## 授權
 
@@ -114,5 +115,7 @@ LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colo
 部分修圖演算法（基礎色調、描述檔、自動調整、污點修復、紅眼、灰塵偵測、Upright、自動拉直、天空／主體遮罩）改編自 LightCraft，Copyright (c) 2026 ArtCraft Team and the LightCraft contributors，MIT License。AI 主體遮罩在使用時才下載：onnxruntime-web（MIT）與 U²-Net-P 權重（Apache-2.0，rembg 的 ONNX 匯出為 MIT），不包含在本 repo 裡。
 
 `src/cammatrix.js` 的相機色彩矩陣取自 rawspeed（darktable）的 `data/cameras.xml`（LGPL-2.1），數值為 Adobe DNG Converter 的 ColorMatrix，以 `tools/make_cam_matrices.py` 產生。
+
+`src/lensfun.js` 的鏡頭校正資料取自 lensfun 專案（https://lensfun.github.io/）的資料庫，依 CC BY-SA 3.0 釋出（此檔也依同一授權），以 `tools/make_lensfun.py` 產生。
 
 膠片模擬的 LUT 資料不屬於本專案的 MIT 授權：大部分改編自 RawTherapee Film Simulation Collection，依 CC BY-SA 4.0 釋出；Gold 200 來自 t3mujinpack（MIT），經典正片風來自 FilmSim（CC0）。詳見 [FILM_LUTS.md](FILM_LUTS.md)。

@@ -42,7 +42,8 @@ function readLens(lr) {
   const p = M._libraw_get_lensinfo(lr);
   // libraw_lensinfo_t: float MinFocal, MaxFocal, MaxAp4MinFocal, MaxAp4MaxFocal, EXIF_MaxAp; char LensMake[128], Lens[128], LensSerial[128], InternalLensSerial[128]; ushort FocalLengthIn35mmFormat; ...
   const h = M.HEAPU8; const s = (o, n) => { let r = ''; for (let i = p + o; i < p + o + n && h[i]; i++) r += String.fromCharCode(h[i]); return r.trim(); };
-  return { lensMake: s(20, 128), lens: s(148, 128) };
+  const [minFocal, maxFocal, maxApMin, maxApMax] = f32(p, 4);
+  return { lensMake: s(20, 128), lens: s(148, 128), minFocal, maxFocal, maxApMin, maxApMax, focal35: h[p + 532] | (h[p + 533] << 8) };
 }
 
 // DNG 1.7 JPEG-XL (compression 52546) needs Adobe's DNG SDK, which this LibRaw build does not include.
@@ -72,7 +73,7 @@ self.onmessage = async (e) => {
       const out = { timings: {} };
       // Nikon lossless NEF: decode the Huffman strip in JS (much faster than LibRaw in wasm), hand LibRaw an uncompressed NEF
       if (isJxlDng(buffer)) throw new Error('JXL_DNG');
-      const lensMD = readLensMeta(buffer);
+      const lensMD = readLensMeta(buffer), camSettings = readCameraDefaults(buffer);
       let input = buffer;
       if (!opts.thumbOnly && !opts.noFast) { const fast = nikonFastRepack(buffer); if (fast) { input = fast; out.fastPath = 'nikon-lossless'; out.timings.fastDecode = performance.now() - t0; } }
       const lr = M._libraw_init(0);
@@ -91,7 +92,7 @@ self.onmessage = async (e) => {
           camMul: [0, 1, 2, 3].map(i => M._libraw_get_cam_mul(lr, i)), preMul: [0, 1, 2, 3].map(i => M._libraw_get_pre_mul(lr, i)),
           isFoveon: !!M._libraw_get_is_foveon(lr)
         });
-        out.lensMD = lensMD;
+        out.lensMD = lensMD; if (camSettings) out.camSettings = camSettings;
         // Embedded preview JPEG (fast path for instant display)
         if (opts.wantThumb) {
           const t = performance.now();
