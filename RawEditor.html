@@ -3833,9 +3833,12 @@ function hueFromOk(rad) { // RGB hue in degrees whose OkLab direction is rad (in
 // measured rounds (colour grading from the neutral tint per zone, saturation from the median chroma, the HSL bands present in both
 // photos), each damped and limited so content differences cannot run away, then the tone again with the colour in place.
 // A black-and-white reference turns on 黑白 (its tint still goes to the grading).
-function matchStyle(im, bm) {
+function refStyle(bm) { // a reference photo's style statistics (small, kept to apply the same style to other photos)
   const c = document.createElement('canvas'), k = Math.min(1, 256 / Math.max(bm.width, bm.height)); c.width = Math.max(8, Math.round(bm.width * k)); c.height = Math.max(8, Math.round(bm.height * k));
-  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bm, 0, 0, c.width, c.height); const ref = styleStats(g.getImageData(0, 0, c.width, c.height).data);
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bm, 0, 0, c.width, c.height); return styleStats(g.getImageData(0, 0, c.width, c.height).data);
+}
+function matchStyle(im, src) {
+  const ref = src.hist ? src : refStyle(src);
   const P = clone(im.params); for (const key of ['curves', 'pcurve', 'grade', 'film', 'bw', 'bwmix']) P[key] = clone(DEFAULTS[key]); P.hsl = zeroHSL(); P.saturation = 0; P.vibrance = 0;
   const mono = ref.colour < 0.01 && ref.cMed < 0.02; if (mono) P.bw = true;
   const G = geometry(P.geo, im.fullW, im.fullH);
@@ -3890,8 +3893,8 @@ async function applyReference(im, file) {
         return { same: true, loc, tg, info: fitCameraLook.last };
       }
     }
-    im.params = matchStyle(im, small); im.presetId = null; refreshAll(); commit();
-    return { same: false, loc };
+    const ref = refStyle(small); im.params = matchStyle(im, ref); im.presetId = null; refreshAll(); commit();
+    return { same: false, loc, ref };
   } finally { if (small && small !== bm) small.close(); bm.close(); }
 }
 async function referenceJpegButton() {
@@ -3905,7 +3908,20 @@ async function referenceJpegButton() {
     toast(`同一張照片${moved ? '（已找出它在畫面中的位置與角度）' : ''}：已對齊它的色調${info.curve ? '、曲線' : ''}${lut}`, 7000, { kind: 'ok', action: moved && !r.loc.o.flip && !r.loc.o.rot
       ? { label: '套用同樣裁切', fn: () => { if (CUR() !== im) return; im.params.geo = geoFromRef(im, r.loc); refreshAll(); fitView(); commit(); } }
       : { label: '復原', fn: undo } });
-  } else toast('不同的照片：已把它的色調風格換成滑桿（曲線、色調分級、飽和度、HSL），可以再自行調整', 7000, { kind: 'ok', action: { label: '復原', fn: undo } });
+  } else toast('不同的照片：已把它的色調風格換成滑桿（曲線、色調分級、飽和度、HSL），可以再自行調整', 9000, { kind: 'ok', action: images.length > 1 ? { label: '套用到全部照片', fn: () => styleToAll(r.ref) } : { label: '復原', fn: undo } });
+}
+// the same reference style on every other open photo: each one is opened and measured, so it gets its own slider values
+async function styleToAll(ref) {
+  const start = cur; let n = 1;
+  for (let i = 0; i < images.length; i++) {
+    if (i === start) continue;
+    await selectImage(i); const im = images[i];
+    if (CUR() !== im || !state.previewData || state.previewData.imId !== im.id) continue; // could not be opened
+    status(`套用參考風格 ${n + 1}／${images.length}…`);
+    im.params = matchStyle(im, ref); im.presetId = null; refreshAll(); commit(); n++;
+  }
+  await selectImage(start); status('');
+  toast(`已把參考風格套用到 ${n} 張照片（每張依自己的內容各別調整）`, 6000, { kind: 'ok' });
 }
 function camLookToast(im) {
   if (camLookToast.shown) return; camLookToast.shown = true;
@@ -6034,7 +6050,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { styleToAll, refStyle, locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
