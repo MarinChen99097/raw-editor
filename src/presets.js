@@ -15,7 +15,7 @@ const DEFAULTS = ({
   // profile: base rendering + slider deltas applied under the user's sliders (see PROFILES in app.js); amount 0..200 %
   profile: 'color', profileAmt: 100, camColor: 0,
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
-  // glow (Lightroom 2026): style diffusion (white mist) | blackmist | bloom | halation | motion | streak; range = how far down the tones it starts,
+  // glow (Lightroom 2026): style diffusion (white mist) | blackmist | orton (Lightroom's Diffusion) | bloom | halation | motion | streak; range = how far down the tones it starts,
   // spread = how far it radiates, warmth -100..100 (halation: yellow..red), dir (degrees) and soft only for motion / streak
   glow: { style: 'diffusion', amount: 0, range: 25, spread: 50, warmth: 0, dir: 0, soft: 30 },
   clarity: 0, dehaze: 0, texture: 0, fade: 0, vignette: 0, vigMid: 50, vigFeather: 50, grain: 0, grainSize: 25,
@@ -43,14 +43,14 @@ const HSL_COLORS = ['#ff4d4d', '#ff9a3c', '#ffe04d', '#5fd65f', '#3fd0d0', '#4d7
 
 const PRESETS = [
   // mist filters (Tiffen Pro-Mist / Black Pro-Mist grades 1/8, 1/4, 1/2) and Lightroom-style glows
-  { id: 'mist_18', cat: 'glow', name: '白柔 1/8', d: '淡淡的乳白光霧，亮部微微發散', p: {glow:{style:'diffusion',amount:25,range:30,spread:60}} },
-  { id: 'mist_14', cat: 'glow', name: '白柔 1/4', d: '明顯的白柔焦，暗部變淡、對比變柔', p: {glow:{style:'diffusion',amount:45,range:30,spread:60}} },
-  { id: 'mist_12', cat: 'glow', name: '白柔 1/2', d: '濃厚的夢幻光霧', p: {glow:{style:'diffusion',amount:75,range:35,spread:65}} },
-  { id: 'bmist_18', cat: 'glow', name: '黑柔 1/8', d: '亮部周圍一點柔光，黑色維持深黑', p: {glow:{style:'blackmist',amount:30,range:20,spread:45}} },
-  { id: 'bmist_14', cat: 'glow', name: '黑柔 1/4', d: '電影感的高光柔化', p: {glow:{style:'blackmist',amount:55,range:20,spread:50}} },
-  { id: 'bmist_12', cat: 'glow', name: '黑柔 1/2', d: '強烈的高光光暈，對比保留', p: {glow:{style:'blackmist',amount:85,range:22,spread:55}} },
-  { id: 'glow_dream', cat: 'glow', name: '暖光夢境', d: '暖色白柔，略帶褪色', p: {fade:8,glow:{style:'diffusion',amount:60,range:45,spread:75,warmth:25}} },
-  { id: 'glow_halation', cat: 'glow', name: '底片暈光', d: '亮光旁的紅橘色暈光', p: {glow:{style:'halation',amount:60,range:12,spread:30,warmth:20}} },
+  { id: 'mist_18', cat: 'glow', name: '白柔 1/8', d: '淡淡的乳白光霧，亮部微微發散', p: {glow:{style:'diffusion',amount:13,range:90,spread:50}} },
+  { id: 'mist_14', cat: 'glow', name: '白柔 1/4', d: '明顯的白柔焦，暗部變淡、對比變柔', p: {glow:{style:'diffusion',amount:25,range:90,spread:50}} },
+  { id: 'mist_12', cat: 'glow', name: '白柔 1/2', d: '濃厚的粉彩光霧', p: {glow:{style:'diffusion',amount:50,range:90,spread:50}} },
+  { id: 'bmist_18', cat: 'glow', name: '黑柔 1/8', d: '亮部周圍一點柔光，黑色維持深黑', p: {glow:{style:'blackmist',amount:13,range:90,spread:50}} },
+  { id: 'bmist_14', cat: 'glow', name: '黑柔 1/4', d: '電影感的高光柔化', p: {glow:{style:'blackmist',amount:25,range:90,spread:50}} },
+  { id: 'bmist_12', cat: 'glow', name: '黑柔 1/2', d: '強烈的高光光暈，對比保留', p: {glow:{style:'blackmist',amount:50,range:90,spread:50}} },
+  { id: 'glow_dream', cat: 'glow', name: '暖光夢境', d: 'Lightroom 式漫射，暖色、夢幻', p: {glow:{style:'orton',amount:45,range:70,spread:60,warmth:25}} },
+  { id: 'glow_halation', cat: 'glow', name: '底片暈光', d: '亮光旁泛紅的底片暈光', p: {glow:{style:'halation',amount:60,range:20,spread:50,warmth:20}} },
   { id: 'glow_cine', cat: 'glow', name: '電影光暈', d: '亮部向外綻放、帶一點暖色', p: {glow:{style:'bloom',amount:50,range:20,spread:55,warmth:15}} },
   { id: 'natural', cat: 'basic', name: '自然增強', d: '小幅提升對比與鮮豔度', p: {contrast:10,vibrance:20,clarity:10,shadows:10,highlights:-10} },
   { id: 'soft_portrait', cat: 'basic', name: '人像柔和', d: '柔化膚質、低對比', p: {contrast:-8,highlights:-15,shadows:15,vibrance:10,saturation:-5,clarity:-8,fade:10,hsl:{s:[0,-10,0,0,0,0,0,0],l:[0,8,0,0,0,0,0,0]},grade:{h:{h:45,s:6,l:0}}} },

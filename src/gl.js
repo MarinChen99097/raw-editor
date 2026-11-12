@@ -10,6 +10,44 @@ function lensSourcePts(T, x, y, W, H) {
   const L = lensAtJS(T, Math.hypot(qx, qy) / R);
   return [[cx + qx * L[0], cy + qy * L[0]], [cx + qx * L[0] * L[2], cy + qy * L[0] * L[2]], [cx + qx * L[0] * L[3], cy + qy * L[0] * L[3]]];
 }
+// Mist filter point-spread functions on the glow pyramid (level i ~ a Gaussian of sigma 0.7 * 2^i px at the 512 px base). The
+// scattered light is a halo (3 exponentials around `halo`, uniform weights) plus a bloom (4 exponentials around `bloom` with
+// weights lambda^(2 - alpha), i.e. a tail falling off as r^-alpha), as in spektrafilm's diffusion-filter model
+// (github.com/andreavolpato/spektrafilm; physical scales converted to px for a full-frame image at Spread 50, our own code).
+// White mist (Pro-Mist): broad halo, heavy bloom tail -> pastel veil; black mist (Black Pro-Mist): tight, halo-dominant, steep
+// tail and less light scattered -> punchy halos, deep blacks. warmth: warm outer halo / cool inner core.
+const GLOW_FAMILIES = {
+  0: { halo: 2.1, haloSpread: 2.0, bloom: 9.2, bloomSpread: 2.5, alpha: 2.9, wHalo: 0.58, warmth: 0.40 },
+  1: { halo: 1.35, haloSpread: 2.0, bloom: 5.4, bloomSpread: 2.5, alpha: 3.5, wHalo: 0.78, warmth: 0.65 },
+};
+// per-channel pyramid weights [r, g, b, a] for the glow settings P (each channel sums to 1 over the n levels)
+function glowLevelWeights(P, n) {
+  const W = Array.from({ length: n }, () => [0, 0, 0, 0]);
+  const put = (sigma, w, chans) => {
+    const l = Math.min(n - 1, Math.max(0, Math.log2(Math.max(sigma, 1e-3) / 0.7))), i = Math.floor(l), f = l - i;
+    for (const c of chans) { W[i][c] += w * (1 - f); W[Math.min(n - 1, i + 1)][c] += w * f; }
+  };
+  const sc = Math.pow(2, (P.spread - 50) / 25), F = GLOW_FAMILIES[P.style];
+  if (F) {
+    const warm = Math.max(-1, Math.min(1, F.warmth + (P.warmth || 0) / 100)), A = [1.0, 0.35, -0.9];
+    const hl = [-1, 0, 1].map(t => F.halo * sc * Math.pow(F.haloSpread, t));
+    for (let c = 0; c < 3; c++) { // energy per channel kept: the warmth only moves red outwards and blue inwards
+      const m = [-1, 0, 1].map(t => Math.max(0.05, 1 + A[c] * warm * t)), ms = m[0] + m[1] + m[2];
+      hl.forEach((lam, k) => put(lam * 1.6, F.wHalo * m[k] / ms, [c]));
+    }
+    const bl = [0, 1, 2, 3].map(k => F.bloom * sc * Math.pow(F.bloomSpread, -1 + 2 * k / 3)), bw = bl.map(l => Math.pow(l, 2 - F.alpha)), bs = bw.reduce((a, b) => a + b, 0);
+    bl.forEach((lam, k) => put(lam * 1.6, (1 - F.wHalo) * bw[k] / bs, [0, 1, 2]));
+  } else if (P.style === 3) {
+    // halation: light reflected back from the film base, several bounces of sigma * sqrt(k), each half the last
+    for (let k = 1; k <= 4; k++) put(3 * sc * Math.sqrt(k), Math.pow(0.5, k - 1), [0, 1, 2]);
+  } else {
+    // bloom, Lightroom-style diffusion: a band of levels around Spread
+    const c = P.spread / 100 * (n - 1); for (let i = 0; i < n; i++) { const w = Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2)); W[i][0] += w; W[i][1] += w; W[i][2] += w; }
+  }
+  for (let c = 0; c < 3; c++) { const s = W.reduce((a, w) => a + w[c], 0) || 1; for (const w of W) w[c] /= s; }
+  for (const w of W) w[3] = w[1];
+  return W;
+}
 const DL_OFF = 4; // log2 luminance offset of the D-Lighting base (keeps I^2 small for half floats)
 class Renderer {
   constructor(canvas) {
@@ -173,7 +211,7 @@ class Renderer {
   ensureGlow(U, src, m) {
     if (!U.glowOn || !this.floatRT) return;
     const P = U.glowP, mm = m ? [m[0], m[1], m[3], m[4]].map(v => v.toFixed(3)).join(',') : '';
-    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.dir, P.soft, mm].join('|');
+    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.warmth, P.dir, P.soft, mm].join('|');
     if (key === this.glowKey && this.glow) return;
     this.glowKey = key; this.buildGlow(U, src, m);
   }
@@ -197,15 +235,14 @@ class Renderer {
       if (w <= 4 || h <= 4) break;
     }
     let out;
-    if (P.style <= 3) {
-      // Spread picks the pyramid levels (0 = a tight halo of a few px, 100 = about a fifth of the frame); weights sum to 1
-      const n = levels.length, c = P.spread / 100 * (n - 1), wts = levels.map((_, i) => Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2))), sum = wts.reduce((a, b) => a + b, 0);
-      const wa = levels.map((_, i) => Math.exp(-((i - (n - 1)) ** 2) / 2)), suma = wa.reduce((a, b) => a + b, 0); // veil: the widest levels
+    if (P.style <= 3 || P.style === 6) {
+      // per-channel level weights from the style's point-spread function (glowLevelWeights)
+      const n = levels.length, LW = glowLevelWeights(P, n);
       let up = levels[n - 1];
       for (let i = n - 2; i >= 0; i--) {
         const cur = levels[i], to = this._glowTarget('U' + i, cur.w, cur.h), low = up, first = i === n - 2;
-        const kl = first ? [wts[n - 1] / sum, wa[n - 1] / suma] : [1, 1], kc = [wts[i] / sum, wa[i] / suma];
-        draw(this.progGUp, to, u => { bind(0, low.tex, u.u_low); bind(1, cur.tex, u.u_cur); gl.uniform2f(u.u_texel, 1 / low.w, 1 / low.h); gl.uniform4f(u.u_k, kc[0], kc[0], kc[0], kc[1]); gl.uniform4f(u.u_kl, kl[0], kl[0], kl[0], kl[1]); });
+        const kl = first ? LW[n - 1] : [1, 1, 1, 1], kc = LW[i];
+        draw(this.progGUp, to, u => { bind(0, low.tex, u.u_low); bind(1, cur.tex, u.u_cur); gl.uniform2f(u.u_texel, 1 / low.w, 1 / low.h); gl.uniform4f(u.u_k, kc[0], kc[1], kc[2], kc[3]); gl.uniform4f(u.u_kl, kl[0], kl[1], kl[2], kl[3]); });
         up = to;
       }
       out = up;

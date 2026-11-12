@@ -276,6 +276,8 @@ button:focus-visible, [role="slider"]:focus-visible, select:focus-visible, input
 .seg::-webkit-scrollbar { display: none; }
 .seg.full { display: flex; }
 .seg.full button { flex: 1; }
+.seg.glowseg { width: 100%; } /* seven styles share one row on a phone */
+.seg.glowseg button { padding: 0 2px; min-width: 0; }
 .seg button { flex: none; min-height: 34px; border: 0; background: transparent; color: var(--ink-muted); font-weight: 400; font-size: 13px; padding: 0 var(--space-12); border-radius: var(--radius-sm); }
 .seg button:active { transform: none; }
 .seg button.on { background: var(--surface-raised); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--line); border: 0; }
@@ -1261,7 +1263,7 @@ uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius
 uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
 uniform float u_mGlow[8];       // glow amount per mask
 uniform sampler2D u_glow;       // glow light (scene-linear, blurred), see FS_GBRIGHT..FS_GDIR
-uniform vec4  u_glowA;          // glow amount, style (0 white mist / diffusion, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak), warmth -1..1, threshold
+uniform vec4  u_glowA;          // glow amount, style (0 white mist, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak, 6 Lightroom diffusion), warmth -1..1, threshold
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -1448,15 +1450,26 @@ void main(){
     vec3 cp = c/max(dlGain, 1e-3), hl = min(cp, vec3(32.0))*smoothstep(u_glowA.w*0.5, u_glowA.w*1.5, dot(cp, LUMA)), d = g - hl;
     vec3 tint = st == 3 ? mix(vec3(1.0, 0.62, 0.25), vec3(1.0, 0.24, 0.1), wm*0.5 + 0.5) : max(vec3(1.0 + 0.35*wm, 1.0, 1.0 - 0.35*wm), vec3(0.0));
     tint /= dot(tint, LUMA);
-    if(st == 0){
-      // white mist (Pro-Mist; Lightroom's Diffusion): part of ALL the light is scattered over a wide area - a milky veil that
-      // lifts the shadows and softens contrast at the same mean brightness - and the highlights bloom on top
-      float sv = clamp(ga*0.25, 0.0, 0.4); vec3 vt = mix(vec3(1.0), tint, 0.5);
-      c = mix(c, vt*gt.a*dlGain, sv) + d*tint*ga*0.3*dlGain;
+    if(st <= 1){
+      // mist filters: a fraction p of the light is deflected into the filter's point-spread function (halo + r^-alpha tail,
+      // warm rim built into the per-channel pyramid weights). p follows the commercial grades - 1/8 ~ 10 %, 1/4 ~ 20 %,
+      // 1/2 ~ 35 %, 1 ~ 55 % (amount 12.5 / 25 / 50 / 100) - times the share that leaves the sharp core; black mist deflects less
+      float p = 0.55*pow(clamp(ga, 0.0, 2.0), 0.68)*(st == 0 ? 0.76 : 0.45);
+      c += d*p*dlGain;
     }
-    else if(st == 1) c += d*tint*ga*0.35*dlGain;                                                 // black mist: highlights only, blacks and contrast kept
+    else if(st == 6){
+      // Lightroom-style diffusion (Orton): a blurred, a little brighter and more saturated copy blended in - dreamy, colour-rich
+      vec3 gs = vec3(dot(g, LUMA)) + (g - vec3(dot(g, LUMA)))*(1.0 + 0.6*ga);
+      c += (gs*1.25*tint - hl)*clamp(ga*0.5, 0.0, 0.8)*dlGain;
+    }                                                 // black mist: highlights only, blacks and contrast kept
     else if(st == 2) c += mix(vec3(dot(d, LUMA)), d, 0.6)*tint*ga*0.45*dlGain;                      // bloom: wider spill, less saturated
-    else if(st == 3) c += tint*max(dot(d, LUMA), 0.0)*ga*0.6*dlGain;                           // halation: a coloured fringe outside bright sources only
+    else if(st == 3){
+      // halation: light reflected off the film base is extra exposure of the red layer (a little the green, not the blue) around
+      // bright sources - added where the surroundings are brighter than the pixel, never taken from the source itself (taking it
+      // turned bright details cyan and dark ones orange); Warmth moves the green share from orange (0.3) to deep red (0)
+      float h = clamp(ga*0.6, 0.0, 1.0), cg = mix(0.3, 0.0, wm*0.5 + 0.5);
+      c.r += h*max(d.r, 0.0)*dlGain; c.g += h*cg*max(d.g, 0.0)*dlGain;
+    }
     else c += max(d, vec3(0.0))*tint*ga*0.8*dlGain;                                            // motion / streak: light drawn out of the sources
   }
   // --- base tone map for RAW (from LightCraft, MIT): extended Reinhard on luminance, white point 2.9 EV over middle grey,
@@ -1642,7 +1655,7 @@ const DEFAULTS = ({
   // profile: base rendering + slider deltas applied under the user's sliders (see PROFILES in app.js); amount 0..200 %
   profile: 'color', profileAmt: 100, camColor: 0,
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
-  // glow (Lightroom 2026): style diffusion (white mist) | blackmist | bloom | halation | motion | streak; range = how far down the tones it starts,
+  // glow (Lightroom 2026): style diffusion (white mist) | blackmist | orton (Lightroom's Diffusion) | bloom | halation | motion | streak; range = how far down the tones it starts,
   // spread = how far it radiates, warmth -100..100 (halation: yellow..red), dir (degrees) and soft only for motion / streak
   glow: { style: 'diffusion', amount: 0, range: 25, spread: 50, warmth: 0, dir: 0, soft: 30 },
   clarity: 0, dehaze: 0, texture: 0, fade: 0, vignette: 0, vigMid: 50, vigFeather: 50, grain: 0, grainSize: 25,
@@ -1670,14 +1683,14 @@ const HSL_COLORS = ['#ff4d4d', '#ff9a3c', '#ffe04d', '#5fd65f', '#3fd0d0', '#4d7
 
 const PRESETS = [
   // mist filters (Tiffen Pro-Mist / Black Pro-Mist grades 1/8, 1/4, 1/2) and Lightroom-style glows
-  { id: 'mist_18', cat: 'glow', name: '白柔 1/8', d: '淡淡的乳白光霧，亮部微微發散', p: {glow:{style:'diffusion',amount:25,range:30,spread:60}} },
-  { id: 'mist_14', cat: 'glow', name: '白柔 1/4', d: '明顯的白柔焦，暗部變淡、對比變柔', p: {glow:{style:'diffusion',amount:45,range:30,spread:60}} },
-  { id: 'mist_12', cat: 'glow', name: '白柔 1/2', d: '濃厚的夢幻光霧', p: {glow:{style:'diffusion',amount:75,range:35,spread:65}} },
-  { id: 'bmist_18', cat: 'glow', name: '黑柔 1/8', d: '亮部周圍一點柔光，黑色維持深黑', p: {glow:{style:'blackmist',amount:30,range:20,spread:45}} },
-  { id: 'bmist_14', cat: 'glow', name: '黑柔 1/4', d: '電影感的高光柔化', p: {glow:{style:'blackmist',amount:55,range:20,spread:50}} },
-  { id: 'bmist_12', cat: 'glow', name: '黑柔 1/2', d: '強烈的高光光暈，對比保留', p: {glow:{style:'blackmist',amount:85,range:22,spread:55}} },
-  { id: 'glow_dream', cat: 'glow', name: '暖光夢境', d: '暖色白柔，略帶褪色', p: {fade:8,glow:{style:'diffusion',amount:60,range:45,spread:75,warmth:25}} },
-  { id: 'glow_halation', cat: 'glow', name: '底片暈光', d: '亮光旁的紅橘色暈光', p: {glow:{style:'halation',amount:60,range:12,spread:30,warmth:20}} },
+  { id: 'mist_18', cat: 'glow', name: '白柔 1/8', d: '淡淡的乳白光霧，亮部微微發散', p: {glow:{style:'diffusion',amount:13,range:90,spread:50}} },
+  { id: 'mist_14', cat: 'glow', name: '白柔 1/4', d: '明顯的白柔焦，暗部變淡、對比變柔', p: {glow:{style:'diffusion',amount:25,range:90,spread:50}} },
+  { id: 'mist_12', cat: 'glow', name: '白柔 1/2', d: '濃厚的粉彩光霧', p: {glow:{style:'diffusion',amount:50,range:90,spread:50}} },
+  { id: 'bmist_18', cat: 'glow', name: '黑柔 1/8', d: '亮部周圍一點柔光，黑色維持深黑', p: {glow:{style:'blackmist',amount:13,range:90,spread:50}} },
+  { id: 'bmist_14', cat: 'glow', name: '黑柔 1/4', d: '電影感的高光柔化', p: {glow:{style:'blackmist',amount:25,range:90,spread:50}} },
+  { id: 'bmist_12', cat: 'glow', name: '黑柔 1/2', d: '強烈的高光光暈，對比保留', p: {glow:{style:'blackmist',amount:50,range:90,spread:50}} },
+  { id: 'glow_dream', cat: 'glow', name: '暖光夢境', d: 'Lightroom 式漫射，暖色、夢幻', p: {glow:{style:'orton',amount:45,range:70,spread:60,warmth:25}} },
+  { id: 'glow_halation', cat: 'glow', name: '底片暈光', d: '亮光旁泛紅的底片暈光', p: {glow:{style:'halation',amount:60,range:20,spread:50,warmth:20}} },
   { id: 'glow_cine', cat: 'glow', name: '電影光暈', d: '亮部向外綻放、帶一點暖色', p: {glow:{style:'bloom',amount:50,range:20,spread:55,warmth:15}} },
   { id: 'natural', cat: 'basic', name: '自然增強', d: '小幅提升對比與鮮豔度', p: {contrast:10,vibrance:20,clarity:10,shadows:10,highlights:-10} },
   { id: 'soft_portrait', cat: 'basic', name: '人像柔和', d: '柔化膚質、低對比', p: {contrast:-8,highlights:-15,shadows:15,vibrance:10,saturation:-5,clarity:-8,fade:10,hsl:{s:[0,-10,0,0,0,0,0,0],l:[0,8,0,0,0,0,0,0]},grade:{h:{h:45,s:6,l:0}}} },
@@ -2179,6 +2192,44 @@ function lensSourcePts(T, x, y, W, H) {
   const L = lensAtJS(T, Math.hypot(qx, qy) / R);
   return [[cx + qx * L[0], cy + qy * L[0]], [cx + qx * L[0] * L[2], cy + qy * L[0] * L[2]], [cx + qx * L[0] * L[3], cy + qy * L[0] * L[3]]];
 }
+// Mist filter point-spread functions on the glow pyramid (level i ~ a Gaussian of sigma 0.7 * 2^i px at the 512 px base). The
+// scattered light is a halo (3 exponentials around `halo`, uniform weights) plus a bloom (4 exponentials around `bloom` with
+// weights lambda^(2 - alpha), i.e. a tail falling off as r^-alpha), as in spektrafilm's diffusion-filter model
+// (github.com/andreavolpato/spektrafilm; physical scales converted to px for a full-frame image at Spread 50, our own code).
+// White mist (Pro-Mist): broad halo, heavy bloom tail -> pastel veil; black mist (Black Pro-Mist): tight, halo-dominant, steep
+// tail and less light scattered -> punchy halos, deep blacks. warmth: warm outer halo / cool inner core.
+const GLOW_FAMILIES = {
+  0: { halo: 2.1, haloSpread: 2.0, bloom: 9.2, bloomSpread: 2.5, alpha: 2.9, wHalo: 0.58, warmth: 0.40 },
+  1: { halo: 1.35, haloSpread: 2.0, bloom: 5.4, bloomSpread: 2.5, alpha: 3.5, wHalo: 0.78, warmth: 0.65 },
+};
+// per-channel pyramid weights [r, g, b, a] for the glow settings P (each channel sums to 1 over the n levels)
+function glowLevelWeights(P, n) {
+  const W = Array.from({ length: n }, () => [0, 0, 0, 0]);
+  const put = (sigma, w, chans) => {
+    const l = Math.min(n - 1, Math.max(0, Math.log2(Math.max(sigma, 1e-3) / 0.7))), i = Math.floor(l), f = l - i;
+    for (const c of chans) { W[i][c] += w * (1 - f); W[Math.min(n - 1, i + 1)][c] += w * f; }
+  };
+  const sc = Math.pow(2, (P.spread - 50) / 25), F = GLOW_FAMILIES[P.style];
+  if (F) {
+    const warm = Math.max(-1, Math.min(1, F.warmth + (P.warmth || 0) / 100)), A = [1.0, 0.35, -0.9];
+    const hl = [-1, 0, 1].map(t => F.halo * sc * Math.pow(F.haloSpread, t));
+    for (let c = 0; c < 3; c++) { // energy per channel kept: the warmth only moves red outwards and blue inwards
+      const m = [-1, 0, 1].map(t => Math.max(0.05, 1 + A[c] * warm * t)), ms = m[0] + m[1] + m[2];
+      hl.forEach((lam, k) => put(lam * 1.6, F.wHalo * m[k] / ms, [c]));
+    }
+    const bl = [0, 1, 2, 3].map(k => F.bloom * sc * Math.pow(F.bloomSpread, -1 + 2 * k / 3)), bw = bl.map(l => Math.pow(l, 2 - F.alpha)), bs = bw.reduce((a, b) => a + b, 0);
+    bl.forEach((lam, k) => put(lam * 1.6, (1 - F.wHalo) * bw[k] / bs, [0, 1, 2]));
+  } else if (P.style === 3) {
+    // halation: light reflected back from the film base, several bounces of sigma * sqrt(k), each half the last
+    for (let k = 1; k <= 4; k++) put(3 * sc * Math.sqrt(k), Math.pow(0.5, k - 1), [0, 1, 2]);
+  } else {
+    // bloom, Lightroom-style diffusion: a band of levels around Spread
+    const c = P.spread / 100 * (n - 1); for (let i = 0; i < n; i++) { const w = Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2)); W[i][0] += w; W[i][1] += w; W[i][2] += w; }
+  }
+  for (let c = 0; c < 3; c++) { const s = W.reduce((a, w) => a + w[c], 0) || 1; for (const w of W) w[c] /= s; }
+  for (const w of W) w[3] = w[1];
+  return W;
+}
 const DL_OFF = 4; // log2 luminance offset of the D-Lighting base (keeps I^2 small for half floats)
 class Renderer {
   constructor(canvas) {
@@ -2342,7 +2393,7 @@ class Renderer {
   ensureGlow(U, src, m) {
     if (!U.glowOn || !this.floatRT) return;
     const P = U.glowP, mm = m ? [m[0], m[1], m[3], m[4]].map(v => v.toFixed(3)).join(',') : '';
-    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.dir, P.soft, mm].join('|');
+    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.warmth, P.dir, P.soft, mm].join('|');
     if (key === this.glowKey && this.glow) return;
     this.glowKey = key; this.buildGlow(U, src, m);
   }
@@ -2366,15 +2417,14 @@ class Renderer {
       if (w <= 4 || h <= 4) break;
     }
     let out;
-    if (P.style <= 3) {
-      // Spread picks the pyramid levels (0 = a tight halo of a few px, 100 = about a fifth of the frame); weights sum to 1
-      const n = levels.length, c = P.spread / 100 * (n - 1), wts = levels.map((_, i) => Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2))), sum = wts.reduce((a, b) => a + b, 0);
-      const wa = levels.map((_, i) => Math.exp(-((i - (n - 1)) ** 2) / 2)), suma = wa.reduce((a, b) => a + b, 0); // veil: the widest levels
+    if (P.style <= 3 || P.style === 6) {
+      // per-channel level weights from the style's point-spread function (glowLevelWeights)
+      const n = levels.length, LW = glowLevelWeights(P, n);
       let up = levels[n - 1];
       for (let i = n - 2; i >= 0; i--) {
         const cur = levels[i], to = this._glowTarget('U' + i, cur.w, cur.h), low = up, first = i === n - 2;
-        const kl = first ? [wts[n - 1] / sum, wa[n - 1] / suma] : [1, 1], kc = [wts[i] / sum, wa[i] / suma];
-        draw(this.progGUp, to, u => { bind(0, low.tex, u.u_low); bind(1, cur.tex, u.u_cur); gl.uniform2f(u.u_texel, 1 / low.w, 1 / low.h); gl.uniform4f(u.u_k, kc[0], kc[0], kc[0], kc[1]); gl.uniform4f(u.u_kl, kl[0], kl[0], kl[0], kl[1]); });
+        const kl = first ? LW[n - 1] : [1, 1, 1, 1], kc = LW[i];
+        draw(this.progGUp, to, u => { bind(0, low.tex, u.u_low); bind(1, cur.tex, u.u_cur); gl.uniform2f(u.u_texel, 1 / low.w, 1 / low.h); gl.uniform4f(u.u_k, kc[0], kc[1], kc[2], kc[3]); gl.uniform4f(u.u_kl, kl[0], kl[1], kl[2], kl[3]); });
         up = to;
       }
       out = up;
@@ -3018,8 +3068,9 @@ function profileParams(p) {
   }
   return q;
 }
-// diffusion = Lightroom's Diffusion, which looks like a white mist (Pro-Mist) filter; black mist is the contrast-keeping variant
-const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒']];
+// index = the shader's style number: diffusion = white mist (Pro-Mist), blackmist = Black Pro-Mist, orton = Lightroom's Diffusion
+const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒'], ['orton', '漫射']];
+const GLOW_ORDER = ['diffusion', 'blackmist', 'orton', 'bloom', 'halation', 'motion', 'streak']; // button order
 let glowUI = {};
 function refreshGlowUI() {
   if (!glowUI.seg) return; const im = CUR(), g = (im && im.params.glow) || DEFAULTS.glow;
@@ -3524,7 +3575,7 @@ function glowUniforms(g) {
   const style = Math.max(0, GLOW_STYLES.findIndex(s => s[0] === g.style));
   // threshold from Range: 0 = only the brightest highlights (about white), 100 = from about 2.5 EV under middle grey; streak: brighter
   const range = g.range ?? 25, thr = 0.9 * Math.pow(2, -range / 100 * 4.5) * (style === 5 ? 2 : 1);
-  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, dir: g.dir || 0, soft: g.soft ?? 30 } };
+  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, warmth: g.warmth || 0, dir: g.dir || 0, soft: g.soft ?? 30 } };
 }
 function baseUniforms(p) {
   const t = p.temp / 100, ti = p.tint / 100;
@@ -3676,13 +3727,13 @@ function buildPanels() {
       const GK = ['glow.amount', 'glow.range', 'glow.spread', 'glow.warmth', 'glow.dir', 'glow.soft'];
       const gh = hdr('光暈', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.glow = clone(DEFAULTS.glow); refreshAll(); commit(); } }, '重設'));
       sec.append(gh); nav.sections.push({ el: gh, keys: ['glow'] });
-      const seg = el('div', { class: 'seg glowseg' }); glowUI.seg = seg;
-      GLOW_STYLES.forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
+      const seg = el('div', { class: 'seg full glowseg' }); glowUI.seg = seg;
+      GLOW_ORDER.map(k => GLOW_STYLES.find(s => s[0] === k)).forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
       sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg));
       sec.append(makeSlider('glow.amount', '強度', 0, 100, 1, fmt.pos), makeSlider('glow.range', '範圍（越高越多色調發光）', 0, 100, 1, fmt.pos),
         makeSlider('glow.spread', '擴散', 0, 100, 1, fmt.pos), makeSlider('glow.warmth', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#6fa8ff,#888,#ffb347)'));
       glowUI.dirBox = el('div', {}, makeSlider('glow.dir', '方向', 0, 180, 1, fmt.deg), makeSlider('glow.soft', '柔和度', 0, 100, 1, fmt.pos)); sec.append(glowUI.dirBox);
-      sec.append(el('div', { class: 'hint' }, '白柔：像白柔焦鏡（Lightroom 的「漫射」），整張蒙上一層乳白光霧，暗部變淡、亮部發散。黑柔：像黑柔焦鏡，只有亮部周圍發出柔光，黑色維持深黑。綻放：亮光溢到周圍暗處。暈光：像底片，最亮的光源旁出現紅橘色光暈（色溫改為黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
+      sec.append(el('div', { class: 'hint' }, '白柔、黑柔：依真實柔焦鏡的散射模擬，強度 12.5／25／50／100 約等於 1/8、1/4、1/2、1 號濾鏡；範圍調高（80 以上）就像實體濾鏡，所有光都會散射。白柔是一層粉彩光霧、暗部變淡；黑柔光暈集中在亮處周圍、黑色維持深黑。漫射：Lightroom 的作法，夢幻、顏色變濃。綻放：亮光溢到周圍暗處。暈光：像底片，亮光旁的紅色版被曝光，邊緣自然泛紅（色溫：黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
     }
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;

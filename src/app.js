@@ -278,8 +278,9 @@ function profileParams(p) {
   }
   return q;
 }
-// diffusion = Lightroom's Diffusion, which looks like a white mist (Pro-Mist) filter; black mist is the contrast-keeping variant
-const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒']];
+// index = the shader's style number: diffusion = white mist (Pro-Mist), blackmist = Black Pro-Mist, orton = Lightroom's Diffusion
+const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒'], ['orton', '漫射']];
+const GLOW_ORDER = ['diffusion', 'blackmist', 'orton', 'bloom', 'halation', 'motion', 'streak']; // button order
 let glowUI = {};
 function refreshGlowUI() {
   if (!glowUI.seg) return; const im = CUR(), g = (im && im.params.glow) || DEFAULTS.glow;
@@ -784,7 +785,7 @@ function glowUniforms(g) {
   const style = Math.max(0, GLOW_STYLES.findIndex(s => s[0] === g.style));
   // threshold from Range: 0 = only the brightest highlights (about white), 100 = from about 2.5 EV under middle grey; streak: brighter
   const range = g.range ?? 25, thr = 0.9 * Math.pow(2, -range / 100 * 4.5) * (style === 5 ? 2 : 1);
-  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, dir: g.dir || 0, soft: g.soft ?? 30 } };
+  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, warmth: g.warmth || 0, dir: g.dir || 0, soft: g.soft ?? 30 } };
 }
 function baseUniforms(p) {
   const t = p.temp / 100, ti = p.tint / 100;
@@ -936,13 +937,13 @@ function buildPanels() {
       const GK = ['glow.amount', 'glow.range', 'glow.spread', 'glow.warmth', 'glow.dir', 'glow.soft'];
       const gh = hdr('光暈', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.glow = clone(DEFAULTS.glow); refreshAll(); commit(); } }, '重設'));
       sec.append(gh); nav.sections.push({ el: gh, keys: ['glow'] });
-      const seg = el('div', { class: 'seg glowseg' }); glowUI.seg = seg;
-      GLOW_STYLES.forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
+      const seg = el('div', { class: 'seg full glowseg' }); glowUI.seg = seg;
+      GLOW_ORDER.map(k => GLOW_STYLES.find(s => s[0] === k)).forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
       sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg));
       sec.append(makeSlider('glow.amount', '強度', 0, 100, 1, fmt.pos), makeSlider('glow.range', '範圍（越高越多色調發光）', 0, 100, 1, fmt.pos),
         makeSlider('glow.spread', '擴散', 0, 100, 1, fmt.pos), makeSlider('glow.warmth', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#6fa8ff,#888,#ffb347)'));
       glowUI.dirBox = el('div', {}, makeSlider('glow.dir', '方向', 0, 180, 1, fmt.deg), makeSlider('glow.soft', '柔和度', 0, 100, 1, fmt.pos)); sec.append(glowUI.dirBox);
-      sec.append(el('div', { class: 'hint' }, '白柔：像白柔焦鏡（Lightroom 的「漫射」），整張蒙上一層乳白光霧，暗部變淡、亮部發散。黑柔：像黑柔焦鏡，只有亮部周圍發出柔光，黑色維持深黑。綻放：亮光溢到周圍暗處。暈光：像底片，最亮的光源旁出現紅橘色光暈（色溫改為黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
+      sec.append(el('div', { class: 'hint' }, '白柔、黑柔：依真實柔焦鏡的散射模擬，強度 12.5／25／50／100 約等於 1/8、1/4、1/2、1 號濾鏡；範圍調高（80 以上）就像實體濾鏡，所有光都會散射。白柔是一層粉彩光霧、暗部變淡；黑柔光暈集中在亮處周圍、黑色維持深黑。漫射：Lightroom 的作法，夢幻、顏色變濃。綻放：亮光溢到周圍暗處。暈光：像底片，亮光旁的紅色版被曝光，邊緣自然泛紅（色溫：黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
     }
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;

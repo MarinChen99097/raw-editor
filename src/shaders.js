@@ -232,7 +232,7 @@ uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius
 uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
 uniform float u_mGlow[8];       // glow amount per mask
 uniform sampler2D u_glow;       // glow light (scene-linear, blurred), see FS_GBRIGHT..FS_GDIR
-uniform vec4  u_glowA;          // glow amount, style (0 white mist / diffusion, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak), warmth -1..1, threshold
+uniform vec4  u_glowA;          // glow amount, style (0 white mist, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak, 6 Lightroom diffusion), warmth -1..1, threshold
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -419,15 +419,26 @@ void main(){
     vec3 cp = c/max(dlGain, 1e-3), hl = min(cp, vec3(32.0))*smoothstep(u_glowA.w*0.5, u_glowA.w*1.5, dot(cp, LUMA)), d = g - hl;
     vec3 tint = st == 3 ? mix(vec3(1.0, 0.62, 0.25), vec3(1.0, 0.24, 0.1), wm*0.5 + 0.5) : max(vec3(1.0 + 0.35*wm, 1.0, 1.0 - 0.35*wm), vec3(0.0));
     tint /= dot(tint, LUMA);
-    if(st == 0){
-      // white mist (Pro-Mist; Lightroom's Diffusion): part of ALL the light is scattered over a wide area - a milky veil that
-      // lifts the shadows and softens contrast at the same mean brightness - and the highlights bloom on top
-      float sv = clamp(ga*0.25, 0.0, 0.4); vec3 vt = mix(vec3(1.0), tint, 0.5);
-      c = mix(c, vt*gt.a*dlGain, sv) + d*tint*ga*0.3*dlGain;
+    if(st <= 1){
+      // mist filters: a fraction p of the light is deflected into the filter's point-spread function (halo + r^-alpha tail,
+      // warm rim built into the per-channel pyramid weights). p follows the commercial grades - 1/8 ~ 10 %, 1/4 ~ 20 %,
+      // 1/2 ~ 35 %, 1 ~ 55 % (amount 12.5 / 25 / 50 / 100) - times the share that leaves the sharp core; black mist deflects less
+      float p = 0.55*pow(clamp(ga, 0.0, 2.0), 0.68)*(st == 0 ? 0.76 : 0.45);
+      c += d*p*dlGain;
     }
-    else if(st == 1) c += d*tint*ga*0.35*dlGain;                                                 // black mist: highlights only, blacks and contrast kept
+    else if(st == 6){
+      // Lightroom-style diffusion (Orton): a blurred, a little brighter and more saturated copy blended in - dreamy, colour-rich
+      vec3 gs = vec3(dot(g, LUMA)) + (g - vec3(dot(g, LUMA)))*(1.0 + 0.6*ga);
+      c += (gs*1.25*tint - hl)*clamp(ga*0.5, 0.0, 0.8)*dlGain;
+    }                                                 // black mist: highlights only, blacks and contrast kept
     else if(st == 2) c += mix(vec3(dot(d, LUMA)), d, 0.6)*tint*ga*0.45*dlGain;                      // bloom: wider spill, less saturated
-    else if(st == 3) c += tint*max(dot(d, LUMA), 0.0)*ga*0.6*dlGain;                           // halation: a coloured fringe outside bright sources only
+    else if(st == 3){
+      // halation: light reflected off the film base is extra exposure of the red layer (a little the green, not the blue) around
+      // bright sources - added where the surroundings are brighter than the pixel, never taken from the source itself (taking it
+      // turned bright details cyan and dark ones orange); Warmth moves the green share from orange (0.3) to deep red (0)
+      float h = clamp(ga*0.6, 0.0, 1.0), cg = mix(0.3, 0.0, wm*0.5 + 0.5);
+      c.r += h*max(d.r, 0.0)*dlGain; c.g += h*cg*max(d.g, 0.0)*dlGain;
+    }
     else c += max(d, vec3(0.0))*tint*ga*0.8*dlGain;                                            // motion / streak: light drawn out of the sources
   }
   // --- base tone map for RAW (from LightCraft, MIT): extended Reinhard on luminance, white point 2.9 EV over middle grey,

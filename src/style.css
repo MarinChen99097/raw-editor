@@ -151,6 +151,8 @@ button:focus-visible, [role="slider"]:focus-visible, select:focus-visible, input
 .seg::-webkit-scrollbar { display: none; }
 .seg.full { display: flex; }
 .seg.full button { flex: 1; }
+.seg.glowseg { width: 100%; } /* seven styles share one row on a phone */
+.seg.glowseg button { padding: 0 2px; min-width: 0; }
 .seg button { flex: none; min-height: 34px; border: 0; background: transparent; color: var(--ink-muted); font-weight: 400; font-size: 13px; padding: 0 var(--space-12); border-radius: var(--radius-sm); }
 .seg button:active { transform: none; }
 .seg button.on { background: var(--surface-raised); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--line); border: 0; }
