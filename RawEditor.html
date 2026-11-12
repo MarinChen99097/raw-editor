@@ -4250,7 +4250,7 @@ function buildLocalPanel(sec) {
   sec.append(hdr('局部調整', el('button', { onclick: () => { const im = CUR(); if (!im || !im.params.masks.length) return; if (!confirm('刪除這張照片的全部遮罩？')) return; im.params.masks = []; state.maskSel = -1; refreshAll(); commit(); } }, '全部刪除')));
   sec.append(el('div', { class: 'toolbar addmask' },
     el('button', { onclick: () => addMask('linear') }, '＋ ▤ 線性漸層'), el('button', { onclick: () => addMask('radial') }, '＋ ◎ 放射狀'), el('button', { onclick: () => addMask('brush') }, '＋ ✎ 筆刷'),
-    el('button', { onclick: () => addMask('sky') }, '＋ ☁ 天空'), el('button', { onclick: () => addMask('subject') }, '＋ ◉ 主體（AI）'), el('button', { onclick: () => addMask('background') }, '＋ ▢ 背景（AI）')));
+    el('button', { onclick: () => addMask('sky') }, '＋ ☁ 天空'), el('button', { onclick: () => addMask('subject') }, '＋ ◉ 主體（AI）'), el('button', { onclick: () => addMask('background') }, '＋ ▢ 背景（AI）'), el('button', { title: 'AI 找出主體和光的方向，放一道光束', onclick: () => aiLightBeam() }, '＋ ☀ 光束（AI）')));
   localUI.chips = el('div', { class: 'chips maskchips' }); sec.append(localUI.chips);
   localUI.empty = el('div', { class: 'hint' }, '新增遮罩後，只有遮罩範圍內會套用下方的調整。線性漸層適合天空，放射狀適合主體或暗角，筆刷可以自由塗抹。');
   sec.append(localUI.empty);
@@ -5129,6 +5129,41 @@ async function runSubjectAI(im) {
   let s = ''; for (let i = 0; i < z.length; i += 32768) s += String.fromCharCode.apply(null, z.subarray(i, i + 32768));
   const zz = btoa(s); AI.cache.set(zz, map); status('');
   return { z: zz, w: 320, h: 320, ms: Math.round(performance.now() - t0), geo: { rot: im.params.geo.rot, flipH: im.params.geo.flipH, flipV: im.params.geo.flipV } };
+}
+// 「光束（AI）」: a shaft of light as a radial mask. The subject model finds the subject; the light comes from where the upper part of
+// the frame is brightest, at most 40 degrees off vertical, and falls across the subject. Inside: brighter, hazier (negative dehaze),
+// glowing, a little warm and flat - stronger on a dark picture. An ordinary mask afterwards: drag, turn, change or delete it.
+async function aiLightBeam() {
+  const im = CUR(); if (!im || !im.fullW || !state.previewData || state.previewData.imId !== im.id) return;
+  if (im.params.masks.length >= 8) { toast('最多 8 個遮罩'); return; }
+  // the model may still have to be downloaded: after 40 s the beam goes to the middle of the frame instead of waiting on a slow network
+  let ai = null; try { ai = await Promise.race([runSubjectAI(im), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 40000))]); } catch (e) { console.error(e); }
+  status(''); if (CUR() !== im) return;
+  const g0 = Object.assign({}, im.params.geo, { angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, tr: null, upright: null }), G0 = geometry(g0, im.fullW, im.fullH, true), Lm = Math.max(im.fullW, im.fullH);
+  const U = uniformsFromParams(im.params, im); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G0, 160, 'beam');
+  let sx = 0.5, x0 = 0.35, x1 = 0.65, y0 = 0.3, y1 = 0.9, found = false;
+  const map = ai && AI.cache.get(ai.z);
+  if (map) {
+    let n = 0, X = 0, a0 = 320, a1 = 0, b0 = 320, b1 = 0;
+    for (let v = 0; v < 320; v++) for (let u = 0; u < 320; u++) if (map[v * 320 + u] > 128) { n++; X += u; a0 = Math.min(a0, u); a1 = Math.max(a1, u); b0 = Math.min(b0, v); b1 = Math.max(b1, v); }
+    if (n > 320 * 320 * 0.01) { found = true; sx = (X / n + 0.5) / 320; x0 = a0 / 320; x1 = (a1 + 1) / 320; y0 = b0 / 320; y1 = (b1 + 1) / 320; }
+  }
+  let ws = 0, lx = 0, mean = 0;
+  for (let y = 0; y < r.h; y++) for (let x = 0; x < r.w; x++) {
+    const i = (y * r.w + x) * 4, Y = 0.2126 * srgbToLin(r.px[i]) + 0.7152 * srgbToLin(r.px[i + 1]) + 0.0722 * srgbToLin(r.px[i + 2]); mean += Math.pow(Y, 1 / 2.2);
+    if (y < r.h * 0.4) { ws += Y * Y; lx += Y * Y * (x + 0.5) / r.w; }
+  }
+  mean /= r.w * r.h; lx = ws > 0 ? lx / ws : 0.5;
+  const W = G0.outW, H = G0.outH, T = [sx, (y0 + y1) / 2], S = [lx, -0.05], lim = (T[1] - S[1]) * H * Math.tan(40 * Math.PI / 180) / W;
+  S[0] = T[0] + clamp(S[0] - T[0], -lim, lim);
+  const ey = Math.min(1, y1 + 0.03), E = [S[0] + (T[0] - S[0]) * (ey - S[1]) / (T[1] - S[1]), ey];
+  const iso = f => { const q = mapPt(G0.m, f[0] * W, f[1] * H); return [q[0] / Lm, q[1] / Lm]; }, A = iso(S), B = iso(E);
+  const m = Object.assign(clone(MASK_DEFAULTS), { id: newId(), type: 'radial', cx: (A[0] + B[0]) / 2, cy: (A[1] + B[1]) / 2, rx: Math.hypot(B[0] - A[0], B[1] - A[1]) / 2 * 1.05,
+    ry: clamp((x1 - x0) * 0.45 * W, 0.1 * Math.min(W, H), 0.22 * Math.min(W, H)) / Lm, angle: Math.round(Math.atan2(B[1] - A[1], B[0] - A[0]) * 180 / Math.PI * 10) / 10, feather: 90 });
+  m.adj = Object.assign({}, m.adj, { exposure: Math.round(clamp(1.35 - mean, 0.5, 1.2) * 100) / 100, dehaze: -35, glow: 50, contrast: -10, temp: 8 });
+  im.params.masks.push(m); state.maskSel = im.params.masks.length - 1; state.showMask = false; refreshAll(); commit();
+  aiLightBeam.last = { found, subject: [x0, y0, x1, y1].map(v => +v.toFixed(2)), light: +lx.toFixed(2), angle: m.angle, exposure: m.adj.exposure };
+  toast(found ? 'AI 已依主體位置和畫面最亮的方向放了一道光束；可以拖曳移動、旋轉，或調下方滑桿' : '找不到明顯的主體，光束先放在畫面中間；可以拖曳移動、旋轉', 6000, { kind: 'ok' });
 }
 async function upgradeSubjectMask(m) {
   const im = CUR(); if (!im) return;
@@ -6055,7 +6090,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { styleToAll, refStyle, locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { aiLightBeam, styleToAll, refStyle, locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
