@@ -1438,7 +1438,7 @@ function buildLocalPanel(sec) {
   sec.append(hdr('局部調整', el('button', { onclick: () => { const im = CUR(); if (!im || !im.params.masks.length) return; if (!confirm('刪除這張照片的全部遮罩？')) return; im.params.masks = []; state.maskSel = -1; refreshAll(); commit(); } }, '全部刪除')));
   sec.append(el('div', { class: 'toolbar addmask' },
     el('button', { onclick: () => addMask('linear') }, '＋ ▤ 線性漸層'), el('button', { onclick: () => addMask('radial') }, '＋ ◎ 放射狀'), el('button', { onclick: () => addMask('brush') }, '＋ ✎ 筆刷'),
-    el('button', { onclick: () => addMask('sky') }, '＋ ☁ 天空'), el('button', { onclick: () => addMask('subject') }, '＋ ◉ 主體（AI）'), el('button', { onclick: () => addMask('background') }, '＋ ▢ 背景（AI）'), el('button', { title: 'AI 找出主體和光的方向，放一道光束', onclick: () => aiLightBeam() }, '＋ ☀ 光束（AI）')));
+    el('button', { onclick: () => addMask('sky') }, '＋ ☁ 天空'), el('button', { onclick: () => addMask('subject') }, '＋ ◉ 主體（AI）'), el('button', { onclick: () => addMask('background') }, '＋ ▢ 背景（AI）'), el('button', { title: 'AI 找出畫面的視覺重點（人、物、建築都可以）和最亮的光源方向，放一道光束', onclick: () => aiLightBeam() }, '＋ ☀ 光束（AI）')));
   localUI.chips = el('div', { class: 'chips maskchips' }); sec.append(localUI.chips);
   localUI.empty = el('div', { class: 'hint' }, '新增遮罩後，只有遮罩範圍內會套用下方的調整。線性漸層適合天空，放射狀適合主體或暗角，筆刷可以自由塗抹。');
   sec.append(localUI.empty);
@@ -2318,8 +2318,8 @@ async function runSubjectAI(im) {
   const zz = btoa(s); AI.cache.set(zz, map); status('');
   return { z: zz, w: 320, h: 320, ms: Math.round(performance.now() - t0), geo: { rot: im.params.geo.rot, flipH: im.params.geo.flipH, flipV: im.params.geo.flipV } };
 }
-// 「光束（AI）」: a shaft of light as a radial mask. The subject model finds the subject; the light comes from where the upper part of
-// the frame is brightest, at most 40 degrees off vertical, and falls across the subject. Inside: brighter, hazier (negative dehaze),
+// 「光束（AI）」: a shaft of light as a radial mask. The saliency model finds what the picture is about (a person, an object, a building); the light
+// comes from the brightest part of the frame away from it and falls across it. Inside: brighter, hazier (negative dehaze),
 // glowing, a little warm and flat - stronger on a dark picture. An ordinary mask afterwards: drag, turn, change or delete it.
 async function aiLightBeam() {
   const im = CUR(); if (!im || !im.fullW || !state.previewData || state.previewData.imId !== im.id) return;
@@ -2336,22 +2336,29 @@ async function aiLightBeam() {
     for (let v = 0; v < 320; v++) for (let u = 0; u < 320; u++) if (map[v * 320 + u] > 128) { n++; X += u; a0 = Math.min(a0, u); a1 = Math.max(a1, u); b0 = Math.min(b0, v); b1 = Math.max(b1, v); }
     if (n > 320 * 320 * 0.01) { found = true; sx = (X / n + 0.5) / 320; x0 = a0 / 320; x1 = (a1 + 1) / 320; y0 = b0 / 320; y1 = (b1 + 1) / 320; }
   }
-  let ws = 0, lx = 0, mean = 0;
+  // the light: the brightest part of the frame away from the target (16 x 16 cells of mean luminance, a little preference for above it);
+  // the beam runs from just beyond it, through the target, to the target's far side - any direction
+  const W = G0.outW, H = G0.outH, mn = Math.min(W, H), N = 16, cell = new Float64Array(N * N), cnt = new Float64Array(N * N); let mean = 0;
   for (let y = 0; y < r.h; y++) for (let x = 0; x < r.w; x++) {
-    const i = (y * r.w + x) * 4, Y = 0.2126 * srgbToLin(r.px[i]) + 0.7152 * srgbToLin(r.px[i + 1]) + 0.0722 * srgbToLin(r.px[i + 2]); mean += Math.pow(Y, 1 / 2.2);
-    if (y < r.h * 0.4) { ws += Y * Y; lx += Y * Y * (x + 0.5) / r.w; }
+    const i = (y * r.w + x) * 4, Y = 0.2126 * srgbToLin(r.px[i]) + 0.7152 * srgbToLin(r.px[i + 1]) + 0.0722 * srgbToLin(r.px[i + 2]), k = ((y * N / r.h) | 0) * N + ((x * N / r.w) | 0);
+    mean += Math.pow(Y, 1 / 2.2); cell[k] += Y; cnt[k]++;
   }
-  mean /= r.w * r.h; lx = ws > 0 ? lx / ws : 0.5;
-  const W = G0.outW, H = G0.outH, T = [sx, (y0 + y1) / 2], S = [lx, -0.05], lim = (T[1] - S[1]) * H * Math.tan(40 * Math.PI / 180) / W;
-  S[0] = T[0] + clamp(S[0] - T[0], -lim, lim);
-  const ey = Math.min(1, y1 + 0.03), E = [S[0] + (T[0] - S[0]) * (ey - S[1]) / (T[1] - S[1]), ey];
+  mean /= r.w * r.h;
+  const T = [sx, (y0 + y1) / 2]; let S = [T[0], 0], best = -1;
+  for (let k = 0; k < N * N; k++) {
+    const cx = (k % N + 0.5) / N, cy = (((k / N) | 0) + 0.5) / N; if (Math.hypot((cx - T[0]) * W, (cy - T[1]) * H) / mn < 0.3) continue;
+    if (found && map[Math.min(319, (cy * 320) | 0) * 320 + Math.min(319, (cx * 320) | 0)] > 128) continue; // part of the target itself (a white dress), not a light
+    const sc = cell[k] / Math.max(cnt[k], 1) * (cy < T[1] ? 1 + (T[1] - cy) : 0.4); if (sc > best) { best = sc; S = [cx, cy]; } // light mostly comes from above
+  }
+  const dx = (T[0] - S[0]) * W, dy = (T[1] - S[1]) * H, L = Math.max(Math.hypot(dx, dy), 1), ux = dx / L, uy = dy / L, half = Math.hypot((x1 - x0) * W, (y1 - y0) * H) * 0.4, light = S.map(v => +v.toFixed(2));
+  const E = [T[0] + ux * half / W, T[1] + uy * half / H]; S = [S[0] - ux * 0.12 * mn / W, S[1] - uy * 0.12 * mn / H];
   const iso = f => { const q = mapPt(G0.m, f[0] * W, f[1] * H); return [q[0] / Lm, q[1] / Lm]; }, A = iso(S), B = iso(E);
   const m = Object.assign(clone(MASK_DEFAULTS), { id: newId(), type: 'radial', cx: (A[0] + B[0]) / 2, cy: (A[1] + B[1]) / 2, rx: Math.hypot(B[0] - A[0], B[1] - A[1]) / 2 * 1.05,
-    ry: clamp((x1 - x0) * 0.45 * W, 0.1 * Math.min(W, H), 0.22 * Math.min(W, H)) / Lm, angle: Math.round(Math.atan2(B[1] - A[1], B[0] - A[0]) * 180 / Math.PI * 10) / 10, feather: 90 });
+    ry: clamp(Math.min((x1 - x0) * W, (y1 - y0) * H) * 0.45, 0.1 * mn, 0.22 * mn) / Lm, angle: Math.round(Math.atan2(B[1] - A[1], B[0] - A[0]) * 180 / Math.PI * 10) / 10, feather: 90 });
   m.adj = Object.assign({}, m.adj, { exposure: Math.round(clamp(1.35 - mean, 0.5, 1.2) * 100) / 100, dehaze: -35, glow: 50, contrast: -10, temp: 8 });
   im.params.masks.push(m); state.maskSel = im.params.masks.length - 1; state.showMask = false; refreshAll(); commit();
-  aiLightBeam.last = { found, subject: [x0, y0, x1, y1].map(v => +v.toFixed(2)), light: +lx.toFixed(2), angle: m.angle, exposure: m.adj.exposure };
-  toast(found ? 'AI 已依主體位置和畫面最亮的方向放了一道光束；可以拖曳移動、旋轉，或調下方滑桿' : '找不到明顯的主體，光束先放在畫面中間；可以拖曳移動、旋轉', 6000, { kind: 'ok' });
+  aiLightBeam.last = { found, subject: [x0, y0, x1, y1].map(v => +v.toFixed(2)), light, angle: m.angle, exposure: m.adj.exposure };
+  toast(found ? 'AI 已從畫面最亮的地方往視覺重點放了一道光束；可以拖曳移動、旋轉，或調下方滑桿' : '找不到明顯的視覺重點，光束先指向畫面中間；可以拖曳移動、旋轉', 6000, { kind: 'ok' });
 }
 async function upgradeSubjectMask(m) {
   const im = CUR(); if (!im) return;
