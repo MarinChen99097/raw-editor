@@ -121,3 +121,7 @@ LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colo
 `src/lensfun.js` 的鏡頭校正資料取自 lensfun 專案（https://lensfun.github.io/）的資料庫，依 CC BY-SA 3.0 釋出（此檔也依同一授權），以 `tools/make_lensfun.py` 產生。
 
 膠片模擬的 LUT 資料不屬於本專案的 MIT 授權：大部分改編自 RawTherapee Film Simulation Collection，依 CC BY-SA 4.0 釋出；Gold 200 來自 t3mujinpack（MIT），經典正片風來自 FilmSim（CC0）。詳見 [FILM_LUTS.md](FILM_LUTS.md)。
+
+## AI 修圖
+
+「AI 修圖」uses the Image-Adaptive 3D LUT model (Zeng et al., TPAMI 2020, https://github.com/HuiZeng/Image-Adaptive-3DLUT, Apache-2.0; weights trained on MIT-Adobe FiveK, for personal non-commercial use). `models/ai3dlut.onnx` is the classifier exported to ONNX, `models/ai3dlut.bin` the three basis LUTs. It runs in the browser; nothing is uploaded.
