@@ -972,12 +972,14 @@ function fitCamLUTCV(A, B, gw, N, total, cap, info) {
 // statistics for matching a style: a 256-level histogram on the curve's axis (perceptual luminance), the tint of near-neutral pixels in
 // shadows / mid-tones / highlights (a grade shows in the neutrals; coloured objects differ with the content), the median chroma, the
 // share of coloured pixels, and per HSL band the mean hue, chroma and lightness of its colours
-function styleStats(px) {
+function styleStats(px, w = 0, h = 0) { // with w, h also vig: how much darker the frame's edges are than its centre (EV)
+  let eY = 0, eN = 0, cY = 0, cN = 0;
   const n = px.length >> 2, step = Math.max(1, Math.floor(n / 60000)), Cs = [], hist = new Float64Array(256);
   const zones = [0, 1, 2].map(() => ({ a: 0, b: 0, n: 0 })), bands = Array.from({ length: 8 }, () => ({ w: 0, x: 0, y: 0, C: 0, L: 0 }));
   let cnt = 0, colour = 0;
   for (let j = 0; j < n; j += step) {
     const i = j * 4, r = srgbToLin(px[i]), g = srgbToLin(px[i + 1]), b = srgbToLin(px[i + 2]), [L, A, B] = linToOklab(r, g, b), C = Math.hypot(A, B); cnt++;
+    if (w) { const d = Math.hypot((j % w + 0.5) / w - 0.5, (((j / w) | 0) + 0.5) / h - 0.5) / 0.7071, Y = 0.2126 * r + 0.7152 * g + 0.0722 * b; if (d > 0.72) { eY += Y; eN++; } else if (d < 0.4) { cY += Y; cN++; } }
     hist[Math.min(255, (Math.pow(Math.max(0, 0.2126 * r + 0.7152 * g + 0.0722 * b), 1 / 2.2) * 256) | 0)]++;
     if (C < 0.04) { const z = zones[L < 0.4 ? 0 : L < 0.7 ? 1 : 2]; z.a += A; z.b += B; z.n++; }
     if (C > 0.015) Cs.push(C);
@@ -986,19 +988,20 @@ function styleStats(px) {
   Cs.sort((p, q) => p - q);
   for (const z of zones) if (z.n) { z.a /= z.n; z.b /= z.n; }
   for (const Q of bands) if (Q.w) { Q.h = (Math.atan2(Q.y, Q.x) * 180 / Math.PI + 360) % 360; Q.C /= Q.w; Q.L /= Q.w; Q.f = Q.w / cnt; }
-  return { hist, zones, cMed: Cs.length ? Cs[Cs.length >> 1] : 0, colour: colour / Math.max(cnt, 1), bands };
+  let dark = 0; for (let i = 0; i < 26; i++) dark += hist[i];
+  return { vig: eN && cN ? Math.log2((eY / eN + 0.002) / (cY / cN + 0.002)) : null, dark: dark / Math.max(cnt, 1), hist, zones, cMed: Cs.length ? Cs[Cs.length >> 1] : 0, colour: colour / Math.max(cnt, 1), bands };
 }
 // RawTherapee's auto-matched tone curve (histmatching.cc), adapted to two different photos: each of our levels goes to the reference
 // level with the same cumulative share; 8 points across the range our image covers (1 %..99 %), slopes kept within 0.3..3, and points in
 // the upper half that would make the curve sag dropped (RawTherapee expects an S: no dips below the chord near the top). Content differs
 // between two photos (a dark street is not a bright beach), so the curve moves 80 % of the way, and the whole move is scaled down when the mid-tones would shift more than 0.25.
-function cdfCurve(oH, rH) {
+function cdfCurve(oH, rH, cap = 0.25) {
   const cdf = h => { const c = new Float64Array(256); let s = 0; for (let i = 0; i < 256; i++) { s += h[i]; c[i] = s; } if (s > 0) for (let i = 0; i < 256; i++) c[i] /= s; return c; };
   const co = cdf(oH), cr = cdf(rH), share = i => i ? (co[i - 1] + co[i]) / 2 : co[0] / 2;
   const inv = t => { let j = 0; while (j < 255 && cr[j] < t) j++; const lo = j ? cr[j - 1] : 0; return (j + clamp(cr[j] > lo ? (t - lo) / (cr[j] - lo) : 0.5, 0, 1)) / 256; };
   const at = t => { let i = 0; while (i < 255 && co[i] < t) i++; return i; };
   const i0 = at(0.01), i1 = Math.min(255, Math.max(i0 + 12, at(0.99))), im = at(0.5), amt = 0.8;
-  const dm = (inv(share(im)) - (im + 0.5) / 256) * amt, f = Math.abs(dm) > 0.25 ? 0.25 / Math.abs(dm) : 1;
+  const dm = (inv(share(im)) - (im + 0.5) / 256) * amt, f = Math.abs(dm) > cap ? cap / Math.abs(dm) : 1;
   let pts = [];
   for (let k = 0; k < 8; k++) { const i = Math.round(i0 + (i1 - i0) * k / 7), x = (i + 0.5) / 256; if (pts.length && x - pts[pts.length - 1][0] < 0.02) continue; pts.push([x, x + (inv(share(i)) - x) * amt * f]); }
   if (pts.length < 2) return null;
@@ -1023,17 +1026,19 @@ function hueFromOk(rad) { // RGB hue in degrees whose OkLab direction is rad (in
 // A black-and-white reference turns on 黑白 (its tint still goes to the grading).
 function refStyle(bm) { // a reference photo's style statistics (small, kept to apply the same style to other photos)
   const c = document.createElement('canvas'), k = Math.min(1, 256 / Math.max(bm.width, bm.height)); c.width = Math.max(8, Math.round(bm.width * k)); c.height = Math.max(8, Math.round(bm.height * k));
-  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bm, 0, 0, c.width, c.height); return styleStats(g.getImageData(0, 0, c.width, c.height).data);
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bm, 0, 0, c.width, c.height); return styleStats(g.getImageData(0, 0, c.width, c.height).data, c.width, c.height);
 }
 function matchStyle(im, src) {
   const ref = src.hist ? src : refStyle(src);
   const P = clone(im.params); for (const key of ['curves', 'pcurve', 'grade', 'film', 'bw', 'bwmix']) P[key] = clone(DEFAULTS[key]); P.hsl = zeroHSL(); P.saturation = 0; P.vibrance = 0;
   const mono = ref.colour < 0.01 && ref.cMed < 0.02; if (mono) P.bw = true;
   const G = geometry(P.geo, im.fullW, im.fullH);
-  const measure = p => { renderer.setCurveLUT(curveLUTFor(p)); const U = uniformsFromParams(p, im, {}); U.showMask = -1; U.clipWarn = 0; return styleStats(renderer.readSmall(U, G, 256, 'style').px); };
-  const tone = () => { const q = clone(P); q.curves = clone(DEFAULTS.curves); const pts = cdfCurve(measure(q).hist, ref.hist); if (pts) P.curves.rgb = pts; };
+  const measure = p => { renderer.setCurveLUT(curveLUTFor(p)); const U = uniformsFromParams(p, im, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, 256, 'style'); return styleStats(r.px, r.w, r.h); };
+  const tone = () => { const q = clone(P); q.curves = clone(DEFAULTS.curves); const pts = cdfCurve(measure(q).hist, ref.hist, 0.25 + 0.15 * (ref.dark || 0)); if (pts) P.curves.rgb = pts; }; // a low-key reference may go darker
   try {
     tone();
+    // dark edges around a bright centre (a low-key picture, a vignette): the creative vignette, measured, 70 % of the way, only darkening
+    if (ref.vig != null) for (let it = 0; it < 3; it++) { const m = measure(P), d = (ref.vig - m.vig) * 0.7; if (m.vig == null || (it === 0 && d > -0.3)) break; if (it === 0) P.vignette = 0; P.vignette = Math.round(clamp(P.vignette + d * 30, -80, 0)); }
     for (let it = 0; it < 3; it++) {
       const m = measure(P);
       for (const [key, z] of [['s', 0], ['m', 1], ['h', 2]]) {
