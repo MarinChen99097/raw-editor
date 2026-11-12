@@ -250,6 +250,7 @@ function packMasks(U, masks) {
     U.mD.set([a.sharpen / 100, (m.lumLo ?? 0) / 100, (m.lumHi ?? 100) / 100, m.hidden ? 0 : (m.opacity ?? 100) / 100], o);
     if (t === 2) U.useBrush = true;
     if (a.sharpen || a.texture || a.noise) U.maskDetail = true;
+    if (a.glow) { if (!U.mGlow) U.mGlow = new Float32Array(8); U.mGlow[i] = a.glow / 100; U.glowOn = true; }
   }
 }
 
@@ -276,6 +277,14 @@ function profileParams(p) {
     else q[key] = cl((p[key] || 0) + v * k);
   }
   return q;
+}
+// diffusion = Lightroom's Diffusion, which looks like a white mist (Pro-Mist) filter; black mist is the contrast-keeping variant
+const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒']];
+let glowUI = {};
+function refreshGlowUI() {
+  if (!glowUI.seg) return; const im = CUR(), g = (im && im.params.glow) || DEFAULTS.glow;
+  [...glowUI.seg.children].forEach(b => b.classList.toggle('on', b.dataset.s === g.style));
+  glowUI.dirBox.style.display = g.style === 'motion' || g.style === 'streak' ? '' : 'none';
 }
 function refreshProfileUI() {
   const im = CUR(); if (!profileUI.chips) return; const cur = im ? (im.params.profile || 'color') : 'color';
@@ -771,6 +780,12 @@ function okHueRad(deg) { // interpolate unit vectors so the 359 -> 0 wrap is smo
   const d = ((deg % 360) + 360) % 360, i = Math.floor(d), f = d - i, a = OK_HUE[i], b = OK_HUE[(i + 1) % 360];
   return Math.atan2(a[1] + (b[1] - a[1]) * f, a[0] + (b[0] - a[0]) * f);
 }
+function glowUniforms(g) {
+  const style = Math.max(0, GLOW_STYLES.findIndex(s => s[0] === g.style));
+  // threshold from Range: 0 = only the brightest highlights (about white), 100 = from about 2.5 EV under middle grey; streak: brighter
+  const range = g.range ?? 25, thr = 0.9 * Math.pow(2, -range / 100 * 4.5) * (style === 5 ? 2 : 1);
+  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, dir: g.dir || 0, soft: g.soft ?? 30 } };
+}
 function baseUniforms(p) {
   const t = p.temp / 100, ti = p.tint / 100;
   let wb = [1 + 0.45 * t, 1 - 0.25 * ti, 1 - 0.45 * t]; wb = wb.map(v => Math.max(0.05, v));
@@ -782,6 +797,7 @@ function baseUniforms(p) {
     contrast: p.contrast / 100, highlights: p.highlights / 100, shadows: p.shadows / 100, whites: p.whites / 100, blacks: p.blacks / 100,
     // D-Lighting: base contrast around middle grey reduced by up to 60 % (100), highlights at half that
     dl: [(p.dlighting || 0) / 100 * 0.6, 0.5, 0, 0],
+    ...glowUniforms(p.glow || DEFAULTS.glow),
     vibrance: p.vibrance / 100, saturation: p.saturation / 100, hsl, bw: p.bw ? 1 : 0, bwmix: p.bwmix.map(v => v / 100),
     gradeS: g(p.grade.s), gradeM: g(p.grade.m), gradeH: g(p.grade.h), gradeBalance: p.grade.balance / 100,
     clarity: p.clarity / 100, dehaze: p.dehaze / 100, texture: p.texture / 100,
@@ -915,6 +931,19 @@ function buildPanels() {
   for (const t of TABS) {
     const sec = el('div', { class: 'sec', id: 'sec-' + t.id }); panel.append(sec);
     if (SL[t.id]) { const h = hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設')); nav.sections.push({ el: h, keys: SL[t.id].map(s => s[0]) }); sec.append(h); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
+    if (t.id === 'fx') {
+      // glow: style buttons and sliders; Direction / Softness only for the directional styles (as in Lightroom)
+      const GK = ['glow.amount', 'glow.range', 'glow.spread', 'glow.warmth', 'glow.dir', 'glow.soft'];
+      const gh = hdr('光暈', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.glow = clone(DEFAULTS.glow); refreshAll(); commit(); } }, '重設'));
+      sec.append(gh); nav.sections.push({ el: gh, keys: ['glow'] });
+      const seg = el('div', { class: 'seg glowseg' }); glowUI.seg = seg;
+      GLOW_STYLES.forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
+      sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg));
+      sec.append(makeSlider('glow.amount', '強度', 0, 100, 1, fmt.pos), makeSlider('glow.range', '範圍（越高越多色調發光）', 0, 100, 1, fmt.pos),
+        makeSlider('glow.spread', '擴散', 0, 100, 1, fmt.pos), makeSlider('glow.warmth', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#6fa8ff,#888,#ffb347)'));
+      glowUI.dirBox = el('div', {}, makeSlider('glow.dir', '方向', 0, 180, 1, fmt.deg), makeSlider('glow.soft', '柔和度', 0, 100, 1, fmt.pos)); sec.append(glowUI.dirBox);
+      sec.append(el('div', { class: 'hint' }, '白柔：像白柔焦鏡（Lightroom 的「漫射」），整張蒙上一層乳白光霧，暗部變淡、亮部發散。黑柔：像黑柔焦鏡，只有亮部周圍發出柔光，黑色維持深黑。綻放：亮光溢到周圍暗處。暈光：像底片，最亮的光源旁出現紅橘色光暈（色溫改為黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
+    }
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
       for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
@@ -1021,7 +1050,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; const st = startingParams(im); for (const k of keys) setPath(im.params, k, clone(getPath(st, k))); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshGlowUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷', sky: '天空', subject: '主體', background: '背景' };
@@ -1057,7 +1086,7 @@ function buildLocalPanel(sec) {
   ed.append(hdr('調整', el('button', { onclick: () => { const m = activeMask(); if (!m) return; m.adj = clone(MASK_DEFAULTS.adj); refreshAll(); commit(); } }, '重設')));
   const AS = [['exposure', '曝光', -4, 4, 0.01, fmt.ev], ['contrast', '對比'], ['highlights', '亮部'], ['shadows', '暗部'], ['whites', '白色'], ['blacks', '黑色'],
     ['temp', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3f78ff,#888,#ffb347)'], ['tint', '色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'],
-    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos], ['colorHue', '色彩：色相', 0, 360, 1, fmt.deg, 'linear-gradient(90deg,#f66,#fc6,#cf6,#6f9,#6ff,#69f,#c6f,#f6c,#f66)'], ['colorSat', '色彩：濃度', 0, 100, 1, fmt.pos]];
+    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos], ['glow', '光暈', 0, 100, 1, fmt.pos], ['colorHue', '色彩：色相', 0, 360, 1, fmt.deg, 'linear-gradient(90deg,#f66,#fc6,#cf6,#6f9,#6ff,#69f,#c6f,#f6c,#f66)'], ['colorSat', '色彩：濃度', 0, 100, 1, fmt.pos]];
   for (const [k, n, mn = -100, mx = 100, st = 1, f = fmt.int, g] of AS) ed.append(makeSlider('M.adj.' + k, n, mn, mx, st, f, g));
   ed.append(makeSlider('M.amount', '整體強度', 0, 200, 1, v => Math.round(v) + '%'));
   ed.append(hdr('範圍'));
@@ -1333,7 +1362,7 @@ const COPY_GROUPS = [
   ['wb', '白平衡', ['temp', 'tint'], true], ['light', '光線', ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting'], true],
   ['presence', '鮮豔度／飽和度', ['vibrance', 'saturation'], true], ['profile', '描述檔／膠片', ['profile', 'profileAmt', 'film'], true],
   ['hsl', 'HSL', ['hsl'], true], ['bw', '黑白', ['bw', 'bwmix'], true], ['curve', '曲線', ['curves', 'pcurve'], true], ['grade', '色調分級', ['grade'], true],
-  ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'], true],
+  ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough', 'glow'], true],
   ['detail', '細節', ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], true], ['calib', '相機校正', ['calib'], true], ['lens', '鏡頭校正', ['lens'], true],
   ['masks', '局部調整（遮罩）', ['masks'], false], ['spots', '污點修復', ['spots'], false], ['geo', '裁切與旋轉', ['geo'], false]];
 function lastPasteGroups() {
@@ -1936,7 +1965,7 @@ const GROUPS = [
 const GROUP_KEYS = {
   presets: ['film'], light: ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting', 'profile', 'profileAmt', 'camColor'],
   color: ['temp', 'tint', 'vibrance', 'saturation', 'hsl', 'pointColors', 'bw', 'bwmix', 'grade', 'calib'], curve: ['curves', 'pcurve'],
-  fx: ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'],
+  fx: ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough', 'glow'],
   detail: ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], local: ['masks', 'spots'], geo: ['geo', 'lens'],
 };
 const groupOf = tab => GROUPS.find(g => g.tabs.some(t => t[0] === tab));
@@ -2112,7 +2141,7 @@ const filmName = id => (FILM_LIST.find(f => f.id === id) || {}).name || id;
 
 // ---------- presets panel ----------
 // Presets only set ordinary sliders (see PRESETS in presets.js), so everything stays adjustable afterwards.
-const PRESET_CATS = [['basic', '基本'], ['lut', '膠片模擬'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['master', '大師風格'], ['user', '我的']];
+const PRESET_CATS = [['basic', '基本'], ['glow', '柔焦濾鏡'], ['lut', '膠片模擬'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['master', '大師風格'], ['user', '我的']];
 let presetUI = { edit: false };
 let presetCat = 'lut'; try { presetCat = localStorage.getItem('rawedit:pcat') || 'lut'; } catch { }
 let hiddenPresets = new Set(); try { hiddenPresets = new Set(JSON.parse(localStorage.getItem('rawedit:hidden') || '[]')); } catch { }

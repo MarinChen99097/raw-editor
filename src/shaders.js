@@ -122,6 +122,55 @@ void main(){
   o = vec4(a1, m.x - a1*m.x, a2, m.z - a2*m.z);
 }`;
 
+// Glow (Lightroom 2026's Glow: diffusion, bloom, halation, motion, streak). Light above a threshold is taken from the source in
+// scene-linear terms (exposure and white balance applied), blurred at low resolution and added back before the tone map, the
+// way scattered light adds to a real exposure: bright glows roll off in the shoulder instead of clipping flat.
+// Pass G1: bright pass, 4x4 samples per texel, each weighted by a soft threshold before averaging (so a small light still glows);
+// alpha = all the light (luminance, no threshold), blurred along for the veil of a white mist filter
+const FS_GBRIGHT = `#version 300 es
+precision highp float; precision highp usampler2D;
+uniform usampler2D u_src; uniform vec2 u_srcSize, u_outSize; uniform vec3 u_gain; uniform vec2 u_thr; // threshold, knee
+out vec4 o;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+void main(){
+  vec2 fp = u_srcSize/u_outSize, p0 = floor(gl_FragCoord.xy)*fp; ivec2 sz = ivec2(u_srcSize);
+  vec3 acc = vec3(0.0); float tot = 0.0;
+  for(int j=0;j<4;j++) for(int i=0;i<4;i++){
+    ivec2 q = clamp(ivec2(p0 + (vec2(i,j)+0.5)*fp*0.25), ivec2(0), sz-1);
+    vec3 c = vec3(texelFetch(u_src,q,0).rgb)/65535.0*u_gain; float L = dot(c, LUMA);
+    acc += min(c, vec3(32.0))*smoothstep(u_thr.x*(1.0-u_thr.y), u_thr.x*(1.0+u_thr.y), L); tot += min(L, 8.0);
+  }
+  o = vec4(acc, tot)/16.0;
+}`;
+// Pass G2: 2x downsample, 4 bilinear taps (a 4x4 footprint)
+const FS_GDOWN = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex; uniform vec2 u_texel; in vec2 v_uv; out vec4 o;
+void main(){ o = 0.25*(texture(u_tex, v_uv+u_texel*vec2(-1.0,-1.0)) + texture(u_tex, v_uv+u_texel*vec2(1.0,-1.0)) + texture(u_tex, v_uv+u_texel*vec2(-1.0,1.0)) + texture(u_tex, v_uv+u_texel*vec2(1.0,1.0))); }`;
+// Pass G3: progressive upsampling: tent-filtered coarser result plus this level's own light (per-channel weights u_k: rgb from
+// Spread, alpha - the white-mist veil - always from the coarsest levels, i.e. light scattered over most of the frame)
+const FS_GUP = `#version 300 es
+precision highp float;
+uniform sampler2D u_low, u_cur; uniform vec2 u_texel; uniform vec4 u_k, u_kl; in vec2 v_uv; out vec4 o;
+void main(){
+  vec2 t = u_texel;
+  vec4 a = texture(u_low, v_uv)*4.0
+    + (texture(u_low, v_uv+vec2(t.x,0.0)) + texture(u_low, v_uv-vec2(t.x,0.0)) + texture(u_low, v_uv+vec2(0.0,t.y)) + texture(u_low, v_uv-vec2(0.0,t.y)))*2.0
+    + texture(u_low, v_uv+t) + texture(u_low, v_uv-t) + texture(u_low, v_uv+vec2(t.x,-t.y)) + texture(u_low, v_uv+vec2(-t.x,t.y));
+  o = a/16.0*u_kl + texture(u_cur, v_uv)*u_k;
+}`;
+// Pass G4: directional blur (motion / streak), 7 taps along u_step; passes with growing steps build a long, smooth line
+const FS_GDIR = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex; uniform vec2 u_step; in vec2 v_uv; out vec4 o;
+void main(){
+  vec4 a = texture(u_tex, v_uv)*0.28;
+  a += (texture(u_tex, v_uv+u_step) + texture(u_tex, v_uv-u_step))*0.2;
+  a += (texture(u_tex, v_uv+u_step*2.0) + texture(u_tex, v_uv-u_step*2.0))*0.1;
+  a += (texture(u_tex, v_uv+u_step*3.0) + texture(u_tex, v_uv-u_step*3.0))*0.06;
+  o = a;
+}`;
+
 // Pass C: the develop pipeline. Output pixel -> full-image pixel via u_m (mat3), then lens correction to the source.
 const FS_MAIN = `#version 300 es
 precision highp float; precision highp int; precision highp usampler2D;
@@ -181,6 +230,9 @@ uniform vec4  u_mC[8];          // saturation, clarity, dehaze, texture
 uniform vec4  u_mD[8];          // sharpen, luminance range low, high, opacity
 uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius (radius <= 0: off)
 uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
+uniform float u_mGlow[8];       // glow amount per mask
+uniform sampler2D u_glow;       // glow light (scene-linear, blurred), see FS_GBRIGHT..FS_GDIR
+uniform vec4  u_glowA;          // glow amount, style (0 white mist / diffusion, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak), warmth -1..1, threshold
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -313,7 +365,7 @@ void main(){
 
   // --- local adjustments: luminance range + accumulate ---
   float Y0 = enc(dot(c*u_exposure*u_wb, LUMA));
-  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, lColA=0.0, lColB=0.0, wShow=0.0;
+  float lGlow=0.0, lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, lColA=0.0, lColB=0.0, wShow=0.0;
   vec3 lab0 = vec3(0.0); if(u_anyCR == 1) lab0 = lin2oklab(max(c*u_exposure*u_wb, 0.0));
   for(int i=0;i<8;i++){
     if(i >= u_nMasks) break;
@@ -322,7 +374,7 @@ void main(){
     if(i == u_showMask) wShow = w;
     lExp += w*u_mA[i].x; lCon += w*u_mA[i].y; lHi += w*u_mA[i].z; lSh += w*u_mA[i].w;
     lWh += w*u_mB[i].x; lBl += w*u_mB[i].y; lTemp += w*u_mB[i].z; lTint += w*u_mB[i].w;
-    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x; lColA += w*u_mF[i].z; lColB += w*u_mF[i].w;
+    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x; lColA += w*u_mF[i].z; lColB += w*u_mF[i].w; lGlow += w*u_mGlow[i];
   }
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
@@ -357,6 +409,27 @@ void main(){
     c = max(c, 0.0);
   }
 
+  // --- glow: blurred light added in scene-linear terms (before the tone map's shoulder) ---
+  float ga = u_glowA.x + lGlow;
+  if(ga > 0.001){
+    // Scattering moves light, it does not add any: each style adds (blurred light - this pixel's own light that scatters), so a
+    // large evenly bright area (a white dress) keeps its level and the glow shows where brightness changes - halos around
+    // highlights, a little light taken from the sharp highlight itself. The glow texture is pre-D-Lighting, so is the comparison.
+    vec4 gt = texture(u_glow, srcG/u_fullSize)*lMul; vec3 g = gt.rgb; float wm = u_glowA.z; int st = int(u_glowA.y + 0.5);
+    vec3 cp = c/max(dlGain, 1e-3), hl = min(cp, vec3(32.0))*smoothstep(u_glowA.w*0.5, u_glowA.w*1.5, dot(cp, LUMA)), d = g - hl;
+    vec3 tint = st == 3 ? mix(vec3(1.0, 0.62, 0.25), vec3(1.0, 0.24, 0.1), wm*0.5 + 0.5) : max(vec3(1.0 + 0.35*wm, 1.0, 1.0 - 0.35*wm), vec3(0.0));
+    tint /= dot(tint, LUMA);
+    if(st == 0){
+      // white mist (Pro-Mist; Lightroom's Diffusion): part of ALL the light is scattered over a wide area - a milky veil that
+      // lifts the shadows and softens contrast at the same mean brightness - and the highlights bloom on top
+      float sv = clamp(ga*0.25, 0.0, 0.4); vec3 vt = mix(vec3(1.0), tint, 0.5);
+      c = mix(c, vt*gt.a*dlGain, sv) + d*tint*ga*0.3*dlGain;
+    }
+    else if(st == 1) c += d*tint*ga*0.35*dlGain;                                                 // black mist: highlights only, blacks and contrast kept
+    else if(st == 2) c += mix(vec3(dot(d, LUMA)), d, 0.6)*tint*ga*0.45*dlGain;                      // bloom: wider spill, less saturated
+    else if(st == 3) c += tint*max(dot(d, LUMA), 0.0)*ga*0.6*dlGain;                           // halation: a coloured fringe outside bright sources only
+    else c += max(d, vec3(0.0))*tint*ga*0.8*dlGain;                                            // motion / streak: light drawn out of the sources
+  }
   // --- base tone map for RAW (from LightCraft, MIT): extended Reinhard on luminance, white point 2.9 EV over middle grey,
   // ratio preserving, then highlight desaturation above 1. Gives a soft film-like shoulder instead of hard clipping. ---
   if(u_baseTone == 1){
@@ -521,4 +594,4 @@ void main(){
   o = a;
 }`;
 
-export { VS_QUAD, FS_LUM, FS_BLUR, FS_LLUM, FS_LBOX, FS_LCOEF, FS_MAIN, FS_DISPLAY };
+export { VS_QUAD, FS_LUM, FS_BLUR, FS_LLUM, FS_LBOX, FS_LCOEF, FS_GBRIGHT, FS_GDOWN, FS_GUP, FS_GDIR, FS_MAIN, FS_DISPLAY };

@@ -23,6 +23,8 @@ class Renderer {
     this.progBlur = this._prog(VS_QUAD, FS_BLUR);
     this.progMain = this._prog(VS_QUAD, FS_MAIN);
     this.progLLum = this._prog(VS_QUAD, FS_LLUM); this.progLBox = this._prog(VS_QUAD, FS_LBOX); this.progLCoef = this._prog(VS_QUAD, FS_LCOEF);
+    this.progGBright = this._prog(VS_QUAD, FS_GBRIGHT); this.progGDown = this._prog(VS_QUAD, FS_GDOWN); this.progGUp = this._prog(VS_QUAD, FS_GUP); this.progGDir = this._prog(VS_QUAD, FS_GDIR);
+    this.glow = null; this.glowKey = ''; this.glowPool = new Map(); this.srcVer = 0; // glow light texture, its settings key, reusable targets
     // D-Lighting needs half-float render targets; without them the slider has no effect
     this.floatRT = !!gl.getExtension('EXT_color_buffer_float');
     this.lbase = null;  // {tex,fb,w,h}: guided filter coefficients (see buildLocal)
@@ -115,7 +117,7 @@ class Renderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, data);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.src = { tex, w, h, scale, fullW: fullW || w * scale, fullH: fullH || h * scale, originX: 0, originY: 0 };
+    this.src = { tex, w, h, scale, fullW: fullW || w * scale, fullH: fullH || h * scale, originX: 0, originY: 0, ver: ++this.srcVer };
     this.buildBlur(this.src);
     return this.src;
   }
@@ -124,7 +126,7 @@ class Renderer {
     const gl = this.gl, s = this.src; if (!s || s.w !== w || s.h !== h) return false;
     gl.bindTexture(gl.TEXTURE_2D, s.tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, data);
-    this._del(this.blur); this.blur = null; this.buildBlur(s); return true;
+    s.ver = ++this.srcVer; this._del(this.blur); this.blur = null; this.buildBlur(s); return true;
   }
   // Build the blurred luminance texture (used for clarity) from a source texture.
   buildBlur(src) {
@@ -164,6 +166,64 @@ class Renderer {
     pass(this.progLCoef, A, B, u => gl.uniform1f(u.u_eps, o.eps));
     box(B, A, 1, 0); box(A, B, 0, 1);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); this._del(A); this.lbase = B;
+  }
+  // Glow light for uniforms U (U.glowP: style, range, spread, dir, soft) from source src, at <= 512 px. Rebuilt only when
+  // the source, exposure / white balance or a glow setting changes. m: output -> full-image matrix (the streak direction is
+  // given in the output frame, so a rotated or cropped photo keeps it).
+  ensureGlow(U, src, m) {
+    if (!U.glowOn || !this.floatRT) return;
+    const P = U.glowP, mm = m ? [m[0], m[1], m[3], m[4]].map(v => v.toFixed(3)).join(',') : '';
+    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.dir, P.soft, mm].join('|');
+    if (key === this.glowKey && this.glow) return;
+    this.glowKey = key; this.buildGlow(U, src, m);
+  }
+  _glowTarget(name, w, h) { // pooled RGBA16F render targets (dragging a slider can rebuild the glow every frame)
+    let t = this.glowPool.get(name); if (t && t.w === w && t.h === h) return t;
+    if (t) this._del(t); t = this._fbTexF(w, h); this.glowPool.set(name, t); return t;
+  }
+  buildGlow(U, src, m) {
+    const gl = this.gl, P = U.glowP, I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    const k = Math.min(1, 512 / Math.max(src.w, src.h)), W = Math.max(16, Math.round(src.w * k)), H = Math.max(16, Math.round(src.h * k));
+    const draw = (Pg, to, set) => { gl.useProgram(Pg.p); gl.uniformMatrix3fv(Pg.u.u_view, false, I3); set(Pg.u); gl.bindFramebuffer(gl.FRAMEBUFFER, to.fb); gl.viewport(0, 0, to.w, to.h); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); };
+    const bind = (unit, tex, loc) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(loc, unit); };
+    gl.bindVertexArray(this.vao);
+    const thr = P.thr; // from Range (glowUniforms in app.js)
+    const L0 = this._glowTarget('L0', W, H);
+    draw(this.progGBright, L0, u => { bind(0, src.tex, u.u_src); gl.uniform2f(u.u_srcSize, src.w, src.h); gl.uniform2f(u.u_outSize, W, H); gl.uniform3f(u.u_gain, U.exposure * U.wb[0], U.exposure * U.wb[1], U.exposure * U.wb[2]); gl.uniform2f(u.u_thr, thr, 0.5); });
+    const levels = [L0];
+    for (let i = 1; i < 7; i++) {
+      const a = levels[i - 1], w = Math.max(4, a.w >> 1), h = Math.max(4, a.h >> 1), b = this._glowTarget('L' + i, w, h);
+      draw(this.progGDown, b, u => { bind(0, a.tex, u.u_tex); gl.uniform2f(u.u_texel, 1 / a.w, 1 / a.h); }); levels.push(b);
+      if (w <= 4 || h <= 4) break;
+    }
+    let out;
+    if (P.style <= 3) {
+      // Spread picks the pyramid levels (0 = a tight halo of a few px, 100 = about a fifth of the frame); weights sum to 1
+      const n = levels.length, c = P.spread / 100 * (n - 1), wts = levels.map((_, i) => Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2))), sum = wts.reduce((a, b) => a + b, 0);
+      const wa = levels.map((_, i) => Math.exp(-((i - (n - 1)) ** 2) / 2)), suma = wa.reduce((a, b) => a + b, 0); // veil: the widest levels
+      let up = levels[n - 1];
+      for (let i = n - 2; i >= 0; i--) {
+        const cur = levels[i], to = this._glowTarget('U' + i, cur.w, cur.h), low = up, first = i === n - 2;
+        const kl = first ? [wts[n - 1] / sum, wa[n - 1] / suma] : [1, 1], kc = [wts[i] / sum, wa[i] / suma];
+        draw(this.progGUp, to, u => { bind(0, low.tex, u.u_low); bind(1, cur.tex, u.u_cur); gl.uniform2f(u.u_texel, 1 / low.w, 1 / low.h); gl.uniform4f(u.u_k, kc[0], kc[0], kc[0], kc[1]); gl.uniform4f(u.u_kl, kl[0], kl[0], kl[0], kl[1]); });
+        up = to;
+      }
+      out = up;
+    } else {
+      // motion / streak along Direction (degrees, output frame) at 256 px: passes with steps 1, 4, 16, 64 texels (Spread sets the
+      // length), then Softness widens the line across (a streak stays thin)
+      const s1 = levels[1], th = P.dir * Math.PI / 180; let dx = Math.cos(th), dy = Math.sin(th);
+      if (m) { const fx = m[0] * dx + m[3] * dy, fy = m[1] * dx + m[4] * dy, l = Math.hypot(fx, fy) || 1; dx = fx / l; dy = fy / l; }
+      const A = this._glowTarget('DA', s1.w, s1.h), B = this._glowTarget('DB', s1.w, s1.h);
+      const along = 2 + Math.round(P.spread / 100 * 3), across = Math.round(P.soft / 100 * (P.style === 5 ? 1 : 3));
+      let from = s1, to = A;
+      const pass = (sx, sy) => { const f = from; draw(this.progGDir, to, u => { bind(0, f.tex, u.u_tex); gl.uniform2f(u.u_step, sx / s1.w, sy / s1.h); }); from = to; to = to === A ? B : A; };
+      for (let i = 0; i < along; i++) { const st = Math.pow(4, i); pass(dx * st, dy * st); }
+      for (let i = 0; i < across; i++) { const st = Math.pow(3, i); pass(-dy * st, dx * st); }
+      out = from;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.activeTexture(gl.TEXTURE0);
+    this.glow = out;
   }
   // rgb: Uint8Array size^3*3, red fastest (index = (b*size + g)*size + r)
   // camera colour LUT (Float32 RGB, size^3, red fastest) or null; replaces the previous one
@@ -222,6 +282,8 @@ class Renderer {
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.blur.tex); gl.uniform1i(u.u_blur, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.curveTex); gl.uniform1i(u.u_curve, 2);
     gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, this.lbase ? this.lbase.tex : this.emptyF); gl.uniform1i(u.u_lbase, 6);
+    { const on = U.glowOn && this.glow; gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, on ? this.glow.tex : this.emptyF); gl.uniform1i(u.u_glow, 7);
+      const a = on ? U.glowA : [0, 0, 0, 0]; gl.uniform4f(u.u_glowA, a[0], a[1], a[2], a[3]); gl.uniform1fv(u.u_mGlow, on && U.mGlow ? U.mGlow : new Float32Array(8)); }
     { const d = this.lbase && U.dl ? U.dl : [0, 0, 0, 0]; gl.uniform4f(u.u_dl, d[0], d[1], DL_OFF, d[3]); }
     gl.uniform2f(u.u_srcSize, src.w, src.h); gl.uniform2f(u.u_srcOrigin, src.originX, src.originY); gl.uniform1i(u.u_srcScale, src.scale);
     gl.uniform2f(u.u_fullSize, src.fullW, src.fullH);
@@ -264,6 +326,7 @@ class Renderer {
     // m maps out px -> full-image px; adjust for the render scale
     const s = G.outW / w; const m = G.m.slice(); // column-major mat3
     const ms = [m[0] * s, m[1] * s, m[2] * s, m[3] * s, m[4] * s, m[5] * s, m[6], m[7], m[8]];
+    this.ensureGlow(U, src, G.m);
     gl.bindVertexArray(this.vao);
     this._setMainUniforms(U, src, w, h, ms);
     gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb); gl.viewport(0, 0, w, h); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -298,6 +361,7 @@ class Renderer {
   async renderExport(U, G, src, onRows, onProgress, isCancelled, bits = 8) {
     const gl = this.gl;
     const prev = { src: this.src, blur: this.blur, blurB: this.blurB, lbase: this.lbase };
+    this.glowKey = ''; // the export computes its own glow from the export source; the preview's is rebuilt afterwards
     const fullW = src.w * src.scale, fullH = src.h * src.scale;
     // blurred luminance from a downsampled copy of the source (<= 2048 px)
     const ds = Math.max(1, Math.ceil(Math.max(src.w, src.h) / 2048));
@@ -307,7 +371,9 @@ class Renderer {
     const smallTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, smallTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGB16UI, dw, dh); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dw, dh, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, small);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    this.blur = null; this.blurB = null; this.lbase = null; this.buildBlur({ tex: smallTex, w: dw, h: dh }); gl.deleteTexture(smallTex);
+    this.blur = null; this.blurB = null; this.lbase = null; this.buildBlur({ tex: smallTex, w: dw, h: dh });
+    if (U.glowOn && this.floatRT) this.buildGlow(U, { tex: smallTex, w: dw, h: dh }, G.m);
+    gl.deleteTexture(smallTex);
     const T = Math.min(2048, this.maxTex, this.maxRB), SH = 64, MARGIN = 8;
     const cols = Math.ceil(G.outW / T), rows = Math.ceil(G.outH / SH);
     const out = this._fbTex(T, SH, false);
@@ -364,7 +430,7 @@ class Renderer {
     } finally {
       this._del(out); if (tileTex) gl.deleteTexture(tileTex);
       this._del(this.blur); this._del(this.blurB); this._del(this.lbase);
-      this.src = prev.src; this.blur = prev.blur; this.blurB = prev.blurB; this.lbase = prev.lbase;
+      this.src = prev.src; this.blur = prev.blur; this.blurB = prev.blurB; this.lbase = prev.lbase; this.glowKey = '';
     }
   }
 }

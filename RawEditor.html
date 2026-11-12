@@ -1151,6 +1151,55 @@ void main(){
   o = vec4(a1, m.x - a1*m.x, a2, m.z - a2*m.z);
 }`;
 
+// Glow (Lightroom 2026's Glow: diffusion, bloom, halation, motion, streak). Light above a threshold is taken from the source in
+// scene-linear terms (exposure and white balance applied), blurred at low resolution and added back before the tone map, the
+// way scattered light adds to a real exposure: bright glows roll off in the shoulder instead of clipping flat.
+// Pass G1: bright pass, 4x4 samples per texel, each weighted by a soft threshold before averaging (so a small light still glows);
+// alpha = all the light (luminance, no threshold), blurred along for the veil of a white mist filter
+const FS_GBRIGHT = `#version 300 es
+precision highp float; precision highp usampler2D;
+uniform usampler2D u_src; uniform vec2 u_srcSize, u_outSize; uniform vec3 u_gain; uniform vec2 u_thr; // threshold, knee
+out vec4 o;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+void main(){
+  vec2 fp = u_srcSize/u_outSize, p0 = floor(gl_FragCoord.xy)*fp; ivec2 sz = ivec2(u_srcSize);
+  vec3 acc = vec3(0.0); float tot = 0.0;
+  for(int j=0;j<4;j++) for(int i=0;i<4;i++){
+    ivec2 q = clamp(ivec2(p0 + (vec2(i,j)+0.5)*fp*0.25), ivec2(0), sz-1);
+    vec3 c = vec3(texelFetch(u_src,q,0).rgb)/65535.0*u_gain; float L = dot(c, LUMA);
+    acc += min(c, vec3(32.0))*smoothstep(u_thr.x*(1.0-u_thr.y), u_thr.x*(1.0+u_thr.y), L); tot += min(L, 8.0);
+  }
+  o = vec4(acc, tot)/16.0;
+}`;
+// Pass G2: 2x downsample, 4 bilinear taps (a 4x4 footprint)
+const FS_GDOWN = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex; uniform vec2 u_texel; in vec2 v_uv; out vec4 o;
+void main(){ o = 0.25*(texture(u_tex, v_uv+u_texel*vec2(-1.0,-1.0)) + texture(u_tex, v_uv+u_texel*vec2(1.0,-1.0)) + texture(u_tex, v_uv+u_texel*vec2(-1.0,1.0)) + texture(u_tex, v_uv+u_texel*vec2(1.0,1.0))); }`;
+// Pass G3: progressive upsampling: tent-filtered coarser result plus this level's own light (per-channel weights u_k: rgb from
+// Spread, alpha - the white-mist veil - always from the coarsest levels, i.e. light scattered over most of the frame)
+const FS_GUP = `#version 300 es
+precision highp float;
+uniform sampler2D u_low, u_cur; uniform vec2 u_texel; uniform vec4 u_k, u_kl; in vec2 v_uv; out vec4 o;
+void main(){
+  vec2 t = u_texel;
+  vec4 a = texture(u_low, v_uv)*4.0
+    + (texture(u_low, v_uv+vec2(t.x,0.0)) + texture(u_low, v_uv-vec2(t.x,0.0)) + texture(u_low, v_uv+vec2(0.0,t.y)) + texture(u_low, v_uv-vec2(0.0,t.y)))*2.0
+    + texture(u_low, v_uv+t) + texture(u_low, v_uv-t) + texture(u_low, v_uv+vec2(t.x,-t.y)) + texture(u_low, v_uv+vec2(-t.x,t.y));
+  o = a/16.0*u_kl + texture(u_cur, v_uv)*u_k;
+}`;
+// Pass G4: directional blur (motion / streak), 7 taps along u_step; passes with growing steps build a long, smooth line
+const FS_GDIR = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex; uniform vec2 u_step; in vec2 v_uv; out vec4 o;
+void main(){
+  vec4 a = texture(u_tex, v_uv)*0.28;
+  a += (texture(u_tex, v_uv+u_step) + texture(u_tex, v_uv-u_step))*0.2;
+  a += (texture(u_tex, v_uv+u_step*2.0) + texture(u_tex, v_uv-u_step*2.0))*0.1;
+  a += (texture(u_tex, v_uv+u_step*3.0) + texture(u_tex, v_uv-u_step*3.0))*0.06;
+  o = a;
+}`;
+
 // Pass C: the develop pipeline. Output pixel -> full-image pixel via u_m (mat3), then lens correction to the source.
 const FS_MAIN = `#version 300 es
 precision highp float; precision highp int; precision highp usampler2D;
@@ -1210,6 +1259,9 @@ uniform vec4  u_mC[8];          // saturation, clarity, dehaze, texture
 uniform vec4  u_mD[8];          // sharpen, luminance range low, high, opacity
 uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius (radius <= 0: off)
 uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
+uniform float u_mGlow[8];       // glow amount per mask
+uniform sampler2D u_glow;       // glow light (scene-linear, blurred), see FS_GBRIGHT..FS_GDIR
+uniform vec4  u_glowA;          // glow amount, style (0 white mist / diffusion, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak), warmth -1..1, threshold
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -1342,7 +1394,7 @@ void main(){
 
   // --- local adjustments: luminance range + accumulate ---
   float Y0 = enc(dot(c*u_exposure*u_wb, LUMA));
-  float lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, lColA=0.0, lColB=0.0, wShow=0.0;
+  float lGlow=0.0, lExp=0.0, lCon=0.0, lHi=0.0, lSh=0.0, lWh=0.0, lBl=0.0, lTemp=0.0, lTint=0.0, lSat=0.0, lCla=0.0, lDeh=0.0, lHue=0.0, lColA=0.0, lColB=0.0, wShow=0.0;
   vec3 lab0 = vec3(0.0); if(u_anyCR == 1) lab0 = lin2oklab(max(c*u_exposure*u_wb, 0.0));
   for(int i=0;i<8;i++){
     if(i >= u_nMasks) break;
@@ -1351,7 +1403,7 @@ void main(){
     if(i == u_showMask) wShow = w;
     lExp += w*u_mA[i].x; lCon += w*u_mA[i].y; lHi += w*u_mA[i].z; lSh += w*u_mA[i].w;
     lWh += w*u_mB[i].x; lBl += w*u_mB[i].y; lTemp += w*u_mB[i].z; lTint += w*u_mB[i].w;
-    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x; lColA += w*u_mF[i].z; lColB += w*u_mF[i].w;
+    lSat += w*u_mC[i].x; lCla += w*u_mC[i].y; lDeh += w*u_mC[i].z; lHue += w*u_mF[i].x; lColA += w*u_mF[i].z; lColB += w*u_mF[i].w; lGlow += w*u_mGlow[i];
   }
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
@@ -1386,6 +1438,27 @@ void main(){
     c = max(c, 0.0);
   }
 
+  // --- glow: blurred light added in scene-linear terms (before the tone map's shoulder) ---
+  float ga = u_glowA.x + lGlow;
+  if(ga > 0.001){
+    // Scattering moves light, it does not add any: each style adds (blurred light - this pixel's own light that scatters), so a
+    // large evenly bright area (a white dress) keeps its level and the glow shows where brightness changes - halos around
+    // highlights, a little light taken from the sharp highlight itself. The glow texture is pre-D-Lighting, so is the comparison.
+    vec4 gt = texture(u_glow, srcG/u_fullSize)*lMul; vec3 g = gt.rgb; float wm = u_glowA.z; int st = int(u_glowA.y + 0.5);
+    vec3 cp = c/max(dlGain, 1e-3), hl = min(cp, vec3(32.0))*smoothstep(u_glowA.w*0.5, u_glowA.w*1.5, dot(cp, LUMA)), d = g - hl;
+    vec3 tint = st == 3 ? mix(vec3(1.0, 0.62, 0.25), vec3(1.0, 0.24, 0.1), wm*0.5 + 0.5) : max(vec3(1.0 + 0.35*wm, 1.0, 1.0 - 0.35*wm), vec3(0.0));
+    tint /= dot(tint, LUMA);
+    if(st == 0){
+      // white mist (Pro-Mist; Lightroom's Diffusion): part of ALL the light is scattered over a wide area - a milky veil that
+      // lifts the shadows and softens contrast at the same mean brightness - and the highlights bloom on top
+      float sv = clamp(ga*0.25, 0.0, 0.4); vec3 vt = mix(vec3(1.0), tint, 0.5);
+      c = mix(c, vt*gt.a*dlGain, sv) + d*tint*ga*0.3*dlGain;
+    }
+    else if(st == 1) c += d*tint*ga*0.35*dlGain;                                                 // black mist: highlights only, blacks and contrast kept
+    else if(st == 2) c += mix(vec3(dot(d, LUMA)), d, 0.6)*tint*ga*0.45*dlGain;                      // bloom: wider spill, less saturated
+    else if(st == 3) c += tint*max(dot(d, LUMA), 0.0)*ga*0.6*dlGain;                           // halation: a coloured fringe outside bright sources only
+    else c += max(d, vec3(0.0))*tint*ga*0.8*dlGain;                                            // motion / streak: light drawn out of the sources
+  }
   // --- base tone map for RAW (from LightCraft, MIT): extended Reinhard on luminance, white point 2.9 EV over middle grey,
   // ratio preserving, then highlight desaturation above 1. Gives a soft film-like shoulder instead of hard clipping. ---
   if(u_baseTone == 1){
@@ -1569,6 +1642,9 @@ const DEFAULTS = ({
   // profile: base rendering + slider deltas applied under the user's sliders (see PROFILES in app.js); amount 0..200 %
   profile: 'color', profileAmt: 100, camColor: 0,
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
+  // glow (Lightroom 2026): style diffusion (white mist) | blackmist | bloom | halation | motion | streak; range = how far down the tones it starts,
+  // spread = how far it radiates, warmth -100..100 (halation: yellow..red), dir (degrees) and soft only for motion / streak
+  glow: { style: 'diffusion', amount: 0, range: 25, spread: 50, warmth: 0, dir: 0, soft: 30 },
   clarity: 0, dehaze: 0, texture: 0, fade: 0, vignette: 0, vigMid: 50, vigFeather: 50, grain: 0, grainSize: 25,
   sharpen: 25, sharpenRadius: 1, nrLum: 0, nrColor: 15,
   geo: { rot: 0, flipH: false, flipV: false, angle: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, aspect: 'free',
@@ -1588,11 +1664,21 @@ const DEFAULTS = ({
 // defaults for one local-adjustment mask (slider paths 'M.xxx' resolve against the active mask)
 const PC_DEFAULTS = { hue: 0, sat: 0, lum: 0, range: 40 };
 const MASK_DEFAULTS = { invert: false, opacity: 100, lumLo: 0, lumHi: 100, feather: 50, angle: 0, amount: 100, colorRange: { on: false, L: 0, a: 0, b: 0, amt: 40 },
-  adj: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, texture: 0, sharpen: 0, hue: 0, noise: 0, colorHue: 30, colorSat: 0 } };
+  adj: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, saturation: 0, clarity: 0, dehaze: 0, texture: 0, sharpen: 0, hue: 0, noise: 0, colorHue: 30, colorSat: 0, glow: 0 } };
 const HSL_NAMES = ['紅', '橙', '黃', '綠', '青', '藍', '紫', '洋紅'];
 const HSL_COLORS = ['#ff4d4d', '#ff9a3c', '#ffe04d', '#5fd65f', '#3fd0d0', '#4d7cff', '#a35cff', '#ff5cc8'];
 
 const PRESETS = [
+  // mist filters (Tiffen Pro-Mist / Black Pro-Mist grades 1/8, 1/4, 1/2) and Lightroom-style glows
+  { id: 'mist_18', cat: 'glow', name: '白柔 1/8', d: '淡淡的乳白光霧，亮部微微發散', p: {glow:{style:'diffusion',amount:25,range:30,spread:60}} },
+  { id: 'mist_14', cat: 'glow', name: '白柔 1/4', d: '明顯的白柔焦，暗部變淡、對比變柔', p: {glow:{style:'diffusion',amount:45,range:30,spread:60}} },
+  { id: 'mist_12', cat: 'glow', name: '白柔 1/2', d: '濃厚的夢幻光霧', p: {glow:{style:'diffusion',amount:75,range:35,spread:65}} },
+  { id: 'bmist_18', cat: 'glow', name: '黑柔 1/8', d: '亮部周圍一點柔光，黑色維持深黑', p: {glow:{style:'blackmist',amount:30,range:20,spread:45}} },
+  { id: 'bmist_14', cat: 'glow', name: '黑柔 1/4', d: '電影感的高光柔化', p: {glow:{style:'blackmist',amount:55,range:20,spread:50}} },
+  { id: 'bmist_12', cat: 'glow', name: '黑柔 1/2', d: '強烈的高光光暈，對比保留', p: {glow:{style:'blackmist',amount:85,range:22,spread:55}} },
+  { id: 'glow_dream', cat: 'glow', name: '暖光夢境', d: '暖色白柔，略帶褪色', p: {fade:8,glow:{style:'diffusion',amount:60,range:45,spread:75,warmth:25}} },
+  { id: 'glow_halation', cat: 'glow', name: '底片暈光', d: '亮光旁的紅橘色暈光', p: {glow:{style:'halation',amount:60,range:12,spread:30,warmth:20}} },
+  { id: 'glow_cine', cat: 'glow', name: '電影光暈', d: '亮部向外綻放、帶一點暖色', p: {glow:{style:'bloom',amount:50,range:20,spread:55,warmth:15}} },
   { id: 'natural', cat: 'basic', name: '自然增強', d: '小幅提升對比與鮮豔度', p: {contrast:10,vibrance:20,clarity:10,shadows:10,highlights:-10} },
   { id: 'soft_portrait', cat: 'basic', name: '人像柔和', d: '柔化膚質、低對比', p: {contrast:-8,highlights:-15,shadows:15,vibrance:10,saturation:-5,clarity:-8,fade:10,hsl:{s:[0,-10,0,0,0,0,0,0],l:[0,8,0,0,0,0,0,0]},grade:{h:{h:45,s:6,l:0}}} },
   { id: 'vivid_land', cat: 'basic', name: '鮮豔風景', d: '天空更藍、綠更濃', p: {contrast:15,vibrance:35,saturation:10,clarity:20,dehaze:15,hsl:{s:[0,0,0,10,10,15,0,0],l:[0,0,0,-5,0,-10,0,0]}} },
@@ -1671,6 +1757,7 @@ function applyPreset(base, preset, amount = 1) {
   if ('bw' in preset) p.bw = preset.bw;
   if (preset.film) p.film = { id: preset.film.id, amount: Math.round(lerp(0, preset.film.amount ?? 100)) };
   if (preset.bwmix) p.bwmix = preset.bwmix.map((v, i) => lerp(0, v));
+  if (preset.glow) p.glow = Object.assign({}, d.glow, preset.glow, { amount: Math.round(lerp(0, preset.glow.amount || 0)) });
   if (preset.hsl) for (const c of ['h', 's', 'l']) if (preset.hsl[c]) p.hsl[c] = preset.hsl[c].map(v => lerp(0, v));
   if (preset.grade) { for (const r of ['s', 'm', 'h', 'g']) if (preset.grade[r]) p.grade[r] = { h: preset.grade[r].h || 0, s: lerp(0, preset.grade[r].s || 0), l: lerp(0, preset.grade[r].l || 0) }; if ('balance' in preset.grade) p.grade.balance = lerp(0, preset.grade.balance); }
   if (preset.curves) for (const c of ['rgb', 'r', 'g', 'b']) if (preset.curves[c]) {
@@ -2105,6 +2192,8 @@ class Renderer {
     this.progBlur = this._prog(VS_QUAD, FS_BLUR);
     this.progMain = this._prog(VS_QUAD, FS_MAIN);
     this.progLLum = this._prog(VS_QUAD, FS_LLUM); this.progLBox = this._prog(VS_QUAD, FS_LBOX); this.progLCoef = this._prog(VS_QUAD, FS_LCOEF);
+    this.progGBright = this._prog(VS_QUAD, FS_GBRIGHT); this.progGDown = this._prog(VS_QUAD, FS_GDOWN); this.progGUp = this._prog(VS_QUAD, FS_GUP); this.progGDir = this._prog(VS_QUAD, FS_GDIR);
+    this.glow = null; this.glowKey = ''; this.glowPool = new Map(); this.srcVer = 0; // glow light texture, its settings key, reusable targets
     // D-Lighting needs half-float render targets; without them the slider has no effect
     this.floatRT = !!gl.getExtension('EXT_color_buffer_float');
     this.lbase = null;  // {tex,fb,w,h}: guided filter coefficients (see buildLocal)
@@ -2197,7 +2286,7 @@ class Renderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, data);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.src = { tex, w, h, scale, fullW: fullW || w * scale, fullH: fullH || h * scale, originX: 0, originY: 0 };
+    this.src = { tex, w, h, scale, fullW: fullW || w * scale, fullH: fullH || h * scale, originX: 0, originY: 0, ver: ++this.srcVer };
     this.buildBlur(this.src);
     return this.src;
   }
@@ -2206,7 +2295,7 @@ class Renderer {
     const gl = this.gl, s = this.src; if (!s || s.w !== w || s.h !== h) return false;
     gl.bindTexture(gl.TEXTURE_2D, s.tex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, data);
-    this._del(this.blur); this.blur = null; this.buildBlur(s); return true;
+    s.ver = ++this.srcVer; this._del(this.blur); this.blur = null; this.buildBlur(s); return true;
   }
   // Build the blurred luminance texture (used for clarity) from a source texture.
   buildBlur(src) {
@@ -2246,6 +2335,64 @@ class Renderer {
     pass(this.progLCoef, A, B, u => gl.uniform1f(u.u_eps, o.eps));
     box(B, A, 1, 0); box(A, B, 0, 1);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); this._del(A); this.lbase = B;
+  }
+  // Glow light for uniforms U (U.glowP: style, range, spread, dir, soft) from source src, at <= 512 px. Rebuilt only when
+  // the source, exposure / white balance or a glow setting changes. m: output -> full-image matrix (the streak direction is
+  // given in the output frame, so a rotated or cropped photo keeps it).
+  ensureGlow(U, src, m) {
+    if (!U.glowOn || !this.floatRT) return;
+    const P = U.glowP, mm = m ? [m[0], m[1], m[3], m[4]].map(v => v.toFixed(3)).join(',') : '';
+    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.dir, P.soft, mm].join('|');
+    if (key === this.glowKey && this.glow) return;
+    this.glowKey = key; this.buildGlow(U, src, m);
+  }
+  _glowTarget(name, w, h) { // pooled RGBA16F render targets (dragging a slider can rebuild the glow every frame)
+    let t = this.glowPool.get(name); if (t && t.w === w && t.h === h) return t;
+    if (t) this._del(t); t = this._fbTexF(w, h); this.glowPool.set(name, t); return t;
+  }
+  buildGlow(U, src, m) {
+    const gl = this.gl, P = U.glowP, I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    const k = Math.min(1, 512 / Math.max(src.w, src.h)), W = Math.max(16, Math.round(src.w * k)), H = Math.max(16, Math.round(src.h * k));
+    const draw = (Pg, to, set) => { gl.useProgram(Pg.p); gl.uniformMatrix3fv(Pg.u.u_view, false, I3); set(Pg.u); gl.bindFramebuffer(gl.FRAMEBUFFER, to.fb); gl.viewport(0, 0, to.w, to.h); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); };
+    const bind = (unit, tex, loc) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(loc, unit); };
+    gl.bindVertexArray(this.vao);
+    const thr = P.thr; // from Range (glowUniforms in app.js)
+    const L0 = this._glowTarget('L0', W, H);
+    draw(this.progGBright, L0, u => { bind(0, src.tex, u.u_src); gl.uniform2f(u.u_srcSize, src.w, src.h); gl.uniform2f(u.u_outSize, W, H); gl.uniform3f(u.u_gain, U.exposure * U.wb[0], U.exposure * U.wb[1], U.exposure * U.wb[2]); gl.uniform2f(u.u_thr, thr, 0.5); });
+    const levels = [L0];
+    for (let i = 1; i < 7; i++) {
+      const a = levels[i - 1], w = Math.max(4, a.w >> 1), h = Math.max(4, a.h >> 1), b = this._glowTarget('L' + i, w, h);
+      draw(this.progGDown, b, u => { bind(0, a.tex, u.u_tex); gl.uniform2f(u.u_texel, 1 / a.w, 1 / a.h); }); levels.push(b);
+      if (w <= 4 || h <= 4) break;
+    }
+    let out;
+    if (P.style <= 3) {
+      // Spread picks the pyramid levels (0 = a tight halo of a few px, 100 = about a fifth of the frame); weights sum to 1
+      const n = levels.length, c = P.spread / 100 * (n - 1), wts = levels.map((_, i) => Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2))), sum = wts.reduce((a, b) => a + b, 0);
+      const wa = levels.map((_, i) => Math.exp(-((i - (n - 1)) ** 2) / 2)), suma = wa.reduce((a, b) => a + b, 0); // veil: the widest levels
+      let up = levels[n - 1];
+      for (let i = n - 2; i >= 0; i--) {
+        const cur = levels[i], to = this._glowTarget('U' + i, cur.w, cur.h), low = up, first = i === n - 2;
+        const kl = first ? [wts[n - 1] / sum, wa[n - 1] / suma] : [1, 1], kc = [wts[i] / sum, wa[i] / suma];
+        draw(this.progGUp, to, u => { bind(0, low.tex, u.u_low); bind(1, cur.tex, u.u_cur); gl.uniform2f(u.u_texel, 1 / low.w, 1 / low.h); gl.uniform4f(u.u_k, kc[0], kc[0], kc[0], kc[1]); gl.uniform4f(u.u_kl, kl[0], kl[0], kl[0], kl[1]); });
+        up = to;
+      }
+      out = up;
+    } else {
+      // motion / streak along Direction (degrees, output frame) at 256 px: passes with steps 1, 4, 16, 64 texels (Spread sets the
+      // length), then Softness widens the line across (a streak stays thin)
+      const s1 = levels[1], th = P.dir * Math.PI / 180; let dx = Math.cos(th), dy = Math.sin(th);
+      if (m) { const fx = m[0] * dx + m[3] * dy, fy = m[1] * dx + m[4] * dy, l = Math.hypot(fx, fy) || 1; dx = fx / l; dy = fy / l; }
+      const A = this._glowTarget('DA', s1.w, s1.h), B = this._glowTarget('DB', s1.w, s1.h);
+      const along = 2 + Math.round(P.spread / 100 * 3), across = Math.round(P.soft / 100 * (P.style === 5 ? 1 : 3));
+      let from = s1, to = A;
+      const pass = (sx, sy) => { const f = from; draw(this.progGDir, to, u => { bind(0, f.tex, u.u_tex); gl.uniform2f(u.u_step, sx / s1.w, sy / s1.h); }); from = to; to = to === A ? B : A; };
+      for (let i = 0; i < along; i++) { const st = Math.pow(4, i); pass(dx * st, dy * st); }
+      for (let i = 0; i < across; i++) { const st = Math.pow(3, i); pass(-dy * st, dx * st); }
+      out = from;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.activeTexture(gl.TEXTURE0);
+    this.glow = out;
   }
   // rgb: Uint8Array size^3*3, red fastest (index = (b*size + g)*size + r)
   // camera colour LUT (Float32 RGB, size^3, red fastest) or null; replaces the previous one
@@ -2304,6 +2451,8 @@ class Renderer {
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.blur.tex); gl.uniform1i(u.u_blur, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.curveTex); gl.uniform1i(u.u_curve, 2);
     gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, this.lbase ? this.lbase.tex : this.emptyF); gl.uniform1i(u.u_lbase, 6);
+    { const on = U.glowOn && this.glow; gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, on ? this.glow.tex : this.emptyF); gl.uniform1i(u.u_glow, 7);
+      const a = on ? U.glowA : [0, 0, 0, 0]; gl.uniform4f(u.u_glowA, a[0], a[1], a[2], a[3]); gl.uniform1fv(u.u_mGlow, on && U.mGlow ? U.mGlow : new Float32Array(8)); }
     { const d = this.lbase && U.dl ? U.dl : [0, 0, 0, 0]; gl.uniform4f(u.u_dl, d[0], d[1], DL_OFF, d[3]); }
     gl.uniform2f(u.u_srcSize, src.w, src.h); gl.uniform2f(u.u_srcOrigin, src.originX, src.originY); gl.uniform1i(u.u_srcScale, src.scale);
     gl.uniform2f(u.u_fullSize, src.fullW, src.fullH);
@@ -2346,6 +2495,7 @@ class Renderer {
     // m maps out px -> full-image px; adjust for the render scale
     const s = G.outW / w; const m = G.m.slice(); // column-major mat3
     const ms = [m[0] * s, m[1] * s, m[2] * s, m[3] * s, m[4] * s, m[5] * s, m[6], m[7], m[8]];
+    this.ensureGlow(U, src, G.m);
     gl.bindVertexArray(this.vao);
     this._setMainUniforms(U, src, w, h, ms);
     gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb); gl.viewport(0, 0, w, h); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -2380,6 +2530,7 @@ class Renderer {
   async renderExport(U, G, src, onRows, onProgress, isCancelled, bits = 8) {
     const gl = this.gl;
     const prev = { src: this.src, blur: this.blur, blurB: this.blurB, lbase: this.lbase };
+    this.glowKey = ''; // the export computes its own glow from the export source; the preview's is rebuilt afterwards
     const fullW = src.w * src.scale, fullH = src.h * src.scale;
     // blurred luminance from a downsampled copy of the source (<= 2048 px)
     const ds = Math.max(1, Math.ceil(Math.max(src.w, src.h) / 2048));
@@ -2389,7 +2540,9 @@ class Renderer {
     const smallTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, smallTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGB16UI, dw, dh); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dw, dh, gl.RGB_INTEGER, gl.UNSIGNED_SHORT, small);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    this.blur = null; this.blurB = null; this.lbase = null; this.buildBlur({ tex: smallTex, w: dw, h: dh }); gl.deleteTexture(smallTex);
+    this.blur = null; this.blurB = null; this.lbase = null; this.buildBlur({ tex: smallTex, w: dw, h: dh });
+    if (U.glowOn && this.floatRT) this.buildGlow(U, { tex: smallTex, w: dw, h: dh }, G.m);
+    gl.deleteTexture(smallTex);
     const T = Math.min(2048, this.maxTex, this.maxRB), SH = 64, MARGIN = 8;
     const cols = Math.ceil(G.outW / T), rows = Math.ceil(G.outH / SH);
     const out = this._fbTex(T, SH, false);
@@ -2446,7 +2599,7 @@ class Renderer {
     } finally {
       this._del(out); if (tileTex) gl.deleteTexture(tileTex);
       this._del(this.blur); this._del(this.blurB); this._del(this.lbase);
-      this.src = prev.src; this.blur = prev.blur; this.blurB = prev.blurB; this.lbase = prev.lbase;
+      this.src = prev.src; this.blur = prev.blur; this.blurB = prev.blurB; this.lbase = prev.lbase; this.glowKey = '';
     }
   }
 }
@@ -2837,6 +2990,7 @@ function packMasks(U, masks) {
     U.mD.set([a.sharpen / 100, (m.lumLo ?? 0) / 100, (m.lumHi ?? 100) / 100, m.hidden ? 0 : (m.opacity ?? 100) / 100], o);
     if (t === 2) U.useBrush = true;
     if (a.sharpen || a.texture || a.noise) U.maskDetail = true;
+    if (a.glow) { if (!U.mGlow) U.mGlow = new Float32Array(8); U.mGlow[i] = a.glow / 100; U.glowOn = true; }
   }
 }
 
@@ -2863,6 +3017,14 @@ function profileParams(p) {
     else q[key] = cl((p[key] || 0) + v * k);
   }
   return q;
+}
+// diffusion = Lightroom's Diffusion, which looks like a white mist (Pro-Mist) filter; black mist is the contrast-keeping variant
+const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒']];
+let glowUI = {};
+function refreshGlowUI() {
+  if (!glowUI.seg) return; const im = CUR(), g = (im && im.params.glow) || DEFAULTS.glow;
+  [...glowUI.seg.children].forEach(b => b.classList.toggle('on', b.dataset.s === g.style));
+  glowUI.dirBox.style.display = g.style === 'motion' || g.style === 'streak' ? '' : 'none';
 }
 function refreshProfileUI() {
   const im = CUR(); if (!profileUI.chips) return; const cur = im ? (im.params.profile || 'color') : 'color';
@@ -3358,6 +3520,12 @@ function okHueRad(deg) { // interpolate unit vectors so the 359 -> 0 wrap is smo
   const d = ((deg % 360) + 360) % 360, i = Math.floor(d), f = d - i, a = OK_HUE[i], b = OK_HUE[(i + 1) % 360];
   return Math.atan2(a[1] + (b[1] - a[1]) * f, a[0] + (b[0] - a[0]) * f);
 }
+function glowUniforms(g) {
+  const style = Math.max(0, GLOW_STYLES.findIndex(s => s[0] === g.style));
+  // threshold from Range: 0 = only the brightest highlights (about white), 100 = from about 2.5 EV under middle grey; streak: brighter
+  const range = g.range ?? 25, thr = 0.9 * Math.pow(2, -range / 100 * 4.5) * (style === 5 ? 2 : 1);
+  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, dir: g.dir || 0, soft: g.soft ?? 30 } };
+}
 function baseUniforms(p) {
   const t = p.temp / 100, ti = p.tint / 100;
   let wb = [1 + 0.45 * t, 1 - 0.25 * ti, 1 - 0.45 * t]; wb = wb.map(v => Math.max(0.05, v));
@@ -3369,6 +3537,7 @@ function baseUniforms(p) {
     contrast: p.contrast / 100, highlights: p.highlights / 100, shadows: p.shadows / 100, whites: p.whites / 100, blacks: p.blacks / 100,
     // D-Lighting: base contrast around middle grey reduced by up to 60 % (100), highlights at half that
     dl: [(p.dlighting || 0) / 100 * 0.6, 0.5, 0, 0],
+    ...glowUniforms(p.glow || DEFAULTS.glow),
     vibrance: p.vibrance / 100, saturation: p.saturation / 100, hsl, bw: p.bw ? 1 : 0, bwmix: p.bwmix.map(v => v / 100),
     gradeS: g(p.grade.s), gradeM: g(p.grade.m), gradeH: g(p.grade.h), gradeBalance: p.grade.balance / 100,
     clarity: p.clarity / 100, dehaze: p.dehaze / 100, texture: p.texture / 100,
@@ -3502,6 +3671,19 @@ function buildPanels() {
   for (const t of TABS) {
     const sec = el('div', { class: 'sec', id: 'sec-' + t.id }); panel.append(sec);
     if (SL[t.id]) { const h = hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設')); nav.sections.push({ el: h, keys: SL[t.id].map(s => s[0]) }); sec.append(h); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
+    if (t.id === 'fx') {
+      // glow: style buttons and sliders; Direction / Softness only for the directional styles (as in Lightroom)
+      const GK = ['glow.amount', 'glow.range', 'glow.spread', 'glow.warmth', 'glow.dir', 'glow.soft'];
+      const gh = hdr('光暈', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.glow = clone(DEFAULTS.glow); refreshAll(); commit(); } }, '重設'));
+      sec.append(gh); nav.sections.push({ el: gh, keys: ['glow'] });
+      const seg = el('div', { class: 'seg glowseg' }); glowUI.seg = seg;
+      GLOW_STYLES.forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
+      sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg));
+      sec.append(makeSlider('glow.amount', '強度', 0, 100, 1, fmt.pos), makeSlider('glow.range', '範圍（越高越多色調發光）', 0, 100, 1, fmt.pos),
+        makeSlider('glow.spread', '擴散', 0, 100, 1, fmt.pos), makeSlider('glow.warmth', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#6fa8ff,#888,#ffb347)'));
+      glowUI.dirBox = el('div', {}, makeSlider('glow.dir', '方向', 0, 180, 1, fmt.deg), makeSlider('glow.soft', '柔和度', 0, 100, 1, fmt.pos)); sec.append(glowUI.dirBox);
+      sec.append(el('div', { class: 'hint' }, '白柔：像白柔焦鏡（Lightroom 的「漫射」），整張蒙上一層乳白光霧，暗部變淡、亮部發散。黑柔：像黑柔焦鏡，只有亮部周圍發出柔光，黑色維持深黑。綻放：亮光溢到周圍暗處。暈光：像底片，最亮的光源旁出現紅橘色光暈（色溫改為黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
+    }
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
       for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
@@ -3608,7 +3790,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; const st = startingParams(im); for (const k of keys) setPath(im.params, k, clone(getPath(st, k))); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshGlowUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷', sky: '天空', subject: '主體', background: '背景' };
@@ -3644,7 +3826,7 @@ function buildLocalPanel(sec) {
   ed.append(hdr('調整', el('button', { onclick: () => { const m = activeMask(); if (!m) return; m.adj = clone(MASK_DEFAULTS.adj); refreshAll(); commit(); } }, '重設')));
   const AS = [['exposure', '曝光', -4, 4, 0.01, fmt.ev], ['contrast', '對比'], ['highlights', '亮部'], ['shadows', '暗部'], ['whites', '白色'], ['blacks', '黑色'],
     ['temp', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#3f78ff,#888,#ffb347)'], ['tint', '色調', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#4fd64f,#888,#ff5cc8)'],
-    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos], ['colorHue', '色彩：色相', 0, 360, 1, fmt.deg, 'linear-gradient(90deg,#f66,#fc6,#cf6,#6f9,#6ff,#69f,#c6f,#f6c,#f66)'], ['colorSat', '色彩：濃度', 0, 100, 1, fmt.pos]];
+    ['saturation', '飽和度'], ['hue', '色相（微調）', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#ff5c8a,#888,#7cd65f)'], ['clarity', '清晰度'], ['dehaze', '去朦朧'], ['texture', '紋理'], ['sharpen', '銳利度'], ['noise', '降噪', 0, 100, 1, fmt.pos], ['glow', '光暈', 0, 100, 1, fmt.pos], ['colorHue', '色彩：色相', 0, 360, 1, fmt.deg, 'linear-gradient(90deg,#f66,#fc6,#cf6,#6f9,#6ff,#69f,#c6f,#f6c,#f66)'], ['colorSat', '色彩：濃度', 0, 100, 1, fmt.pos]];
   for (const [k, n, mn = -100, mx = 100, st = 1, f = fmt.int, g] of AS) ed.append(makeSlider('M.adj.' + k, n, mn, mx, st, f, g));
   ed.append(makeSlider('M.amount', '整體強度', 0, 200, 1, v => Math.round(v) + '%'));
   ed.append(hdr('範圍'));
@@ -3920,7 +4102,7 @@ const COPY_GROUPS = [
   ['wb', '白平衡', ['temp', 'tint'], true], ['light', '光線', ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting'], true],
   ['presence', '鮮豔度／飽和度', ['vibrance', 'saturation'], true], ['profile', '描述檔／膠片', ['profile', 'profileAmt', 'film'], true],
   ['hsl', 'HSL', ['hsl'], true], ['bw', '黑白', ['bw', 'bwmix'], true], ['curve', '曲線', ['curves', 'pcurve'], true], ['grade', '色調分級', ['grade'], true],
-  ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'], true],
+  ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough', 'glow'], true],
   ['detail', '細節', ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], true], ['calib', '相機校正', ['calib'], true], ['lens', '鏡頭校正', ['lens'], true],
   ['masks', '局部調整（遮罩）', ['masks'], false], ['spots', '污點修復', ['spots'], false], ['geo', '裁切與旋轉', ['geo'], false]];
 function lastPasteGroups() {
@@ -4523,7 +4705,7 @@ const GROUPS = [
 const GROUP_KEYS = {
   presets: ['film'], light: ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting', 'profile', 'profileAmt', 'camColor'],
   color: ['temp', 'tint', 'vibrance', 'saturation', 'hsl', 'pointColors', 'bw', 'bwmix', 'grade', 'calib'], curve: ['curves', 'pcurve'],
-  fx: ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough'],
+  fx: ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough', 'glow'],
   detail: ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], local: ['masks', 'spots'], geo: ['geo', 'lens'],
 };
 const groupOf = tab => GROUPS.find(g => g.tabs.some(t => t[0] === tab));
@@ -4699,7 +4881,7 @@ const filmName = id => (FILM_LIST.find(f => f.id === id) || {}).name || id;
 
 // ---------- presets panel ----------
 // Presets only set ordinary sliders (see PRESETS in presets.js), so everything stays adjustable afterwards.
-const PRESET_CATS = [['basic', '基本'], ['lut', '膠片模擬'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['master', '大師風格'], ['user', '我的']];
+const PRESET_CATS = [['basic', '基本'], ['glow', '柔焦濾鏡'], ['lut', '膠片模擬'], ['fuji', '富士底片模擬'], ['japanese', '日系'], ['cinematic', '電影感'], ['film', '經典底片'], ['bw', '黑白'], ['master', '大師風格'], ['user', '我的']];
 let presetUI = { edit: false };
 let presetCat = 'lut'; try { presetCat = localStorage.getItem('rawedit:pcat') || 'lut'; } catch { }
 let hiddenPresets = new Set(); try { hiddenPresets = new Set(JSON.parse(localStorage.getItem('rawedit:hidden') || '[]')); } catch { }
