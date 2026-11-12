@@ -166,7 +166,10 @@ button:focus-visible, [role="slider"]:focus-visible, select:focus-visible, input
 .pcats button.on { background: var(--ink); border-color: var(--ink); color: var(--bg); font-weight: 500; }
 .toolbar, .croptools { display: flex; gap: var(--space-6); flex-wrap: wrap; margin: var(--space-8) 0; }
 .addmask button { flex: 1 1 auto; }
-.profchips { margin: 2px 0 var(--space-6); }
+.profchips { display: grid; grid-template-columns: repeat(4, 1fr); margin: 2px 0 var(--space-6); } /* seven profiles: two even rows */
+.profchips button { padding: 0 var(--space-4); min-width: 0; }
+.startrow { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-6); margin: var(--space-4) 0 var(--space-8); } /* AI, camera look, reference photo */
+.startrow button { min-height: 40px; padding: 0 var(--space-4); min-width: 0; white-space: nowrap; }
 .wbbar { align-items: center; } .wbbar .hint { margin: 0 var(--space-4) 0 0; }
 
 /* ---------- HSL bands, curve ---------- */

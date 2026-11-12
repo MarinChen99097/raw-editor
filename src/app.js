@@ -297,8 +297,10 @@ function refreshGlowUI() {
   const s = glowStyle(g.style); [...glowUI.seg.children].forEach(b => b.classList.toggle('on', b.dataset.s === s.k));
   glowUI.dirBox.style.display = s.kind === 'dir' ? '' : 'none'; glowUI.rangeBox.style.display = s.kind === 'mist' ? 'none' : '';
 }
+const lutLabel = id => !id ? '相機色彩強度' : id.startsWith('ai') ? 'AI 強度' : '參考照片強度'; // the colour LUT's slider, named after where its LUT came from
 function refreshProfileUI() {
   const im = CUR(); if (!profileUI.chips) return; const cur = im ? (im.params.profile || 'color') : 'color';
+  if (profileUI.lut) { const id = im ? im.params.lutRef || '' : '', t = lutLabel(id), r = profileUI.lut; r.querySelector('.lbl').textContent = t; r.setAttribute('aria-label', t); r.style.display = im && im.file._isImage && !id ? 'none' : ''; } // a JPEG has no camera LUT
   [...profileUI.chips.children].forEach(b => b.classList.toggle('on', b.dataset.p === cur));
 }
 // Auto tone (LightCraft's recipe, fitted to Lightroom on raw files): exposure from the mean log luminance of the white-balanced
@@ -801,7 +803,7 @@ async function saveRefLut(id, L, cap = REF_CAP) { // cap: the largest offset sto
     try { localStorage.setItem(REF_LUT + id, s); localStorage.setItem(REF_LUT + 'ids', JSON.stringify(ids)); return true; }
     catch (e) { if (ids.length <= 1) break; localStorage.removeItem(REF_LUT + ids.shift()); } // full: drop the oldest and try again
   }
-  toast('瀏覽器的儲存空間不足：重新整理後，這張照片的「色彩對齊」要再選一次參考照片', 5000); return false;
+  toast('瀏覽器的儲存空間不足：重新整理後，這張照片的 AI／參考照片顏色要重新套用一次', 5000); return false;
 }
 async function loadRefLut(id) {
   try {
@@ -1098,7 +1100,7 @@ async function referenceJpegButton() {
   if (!r || CUR() !== im) return;
   if (r.same) {
     const c = r.tg.crop, moved = c.w * c.h < 0.9 || Math.abs(r.loc.P.th) > 0.004 || r.loc.o.rot || r.loc.o.flip;
-    const info = r.info || {}, lut = im.params.lutRef ? '；「色彩對齊」控制顏色貼合的程度' : '';
+    const info = r.info || {}, lut = im.params.lutRef ? '；「參考照片強度」控制顏色貼合的程度' : '';
     toast(`同一張照片${moved ? '（已找出它在畫面中的位置與角度）' : ''}：已對齊它的色調${info.curve ? '、曲線' : ''}${lut}`, 7000, { kind: 'ok', action: moved && !r.loc.o.flip && !r.loc.o.rot
       ? { label: '套用同樣裁切', fn: () => { if (CUR() !== im) return; im.params.geo = geoFromRef(im, r.loc); refreshAll(); fitView(); commit(); } }
       : { label: '復原', fn: undo } });
@@ -1324,10 +1326,11 @@ function buildPanels() {
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
       for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
-      const auto = el('button', { class: 'primary', title: 'AI 依它自己的喜好修這張照片（在這台裝置上跑，不上傳）；模型載入不了時改用公式調整曝光與亮暗部', onclick: () => aiRetouch() }, '自動');
+      const auto = el('button', { class: 'primary', title: 'AI 依它自己的喜好修這張照片（在這台裝置上跑，不上傳）；模型載入不了時改用公式調整曝光與亮暗部', onclick: () => aiRetouch() }, 'AI 自動');
       const cam = el('button', { title: '讓顏色和亮度接近相機拍出來的 JPEG', onclick: () => cameraLookButton() }, '相機色調');
       const ref = el('button', { title: '選一張照片：同一張照片（裁切、轉正、修過都可以）就逐格對齊它的顏色；不同的照片就套用它的色調風格', onclick: () => referenceJpegButton() }, '參考照片');
-      sec.insertBefore(el('div', {}, hdr('描述檔', ref, cam, auto), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%'), makeSlider('camColor', '色彩對齊', 0, 100, 1, v => Math.round(v) + '%')), sec.children[0]);
+      const lut = makeSlider('camColor', lutLabel(''), 0, 100, 1, v => Math.round(v) + '%'); profileUI.lut = lut;
+      sec.insertBefore(el('div', {}, hdr('一鍵調色'), el('div', { class: 'startrow' }, auto, cam, ref), lut, hdr('描述檔'), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%')), sec.children[0]);
     }
     if (t.id === 'color') {
       const wbBar = el('div', { class: 'toolbar wbbar' }, el('span', { class: 'hint' }, '白平衡'),
@@ -2357,7 +2360,7 @@ async function aiRetouch() {
     const id = 'ai' + Date.now().toString(36); await saveRefLut(id, L, Math.max(REF_CAP, mx * 1.01)); if (CUR() !== im) return;
     np.lutRef = id; np.camColor = 100; im.params = np; im.presetId = null; refreshAll(); commit();
     aiRetouch.last = { w: Array.from(w).map(v => +v.toFixed(3)), mx: +mx.toFixed(3) };
-    toast('自動：AI 已依它的喜好修圖。「色彩對齊」是它的強度，其他滑桿都可以再調', 7000, { kind: 'ok', action: { label: '復原', fn: undo } });
+    toast('自動：AI 已依它的喜好修圖。用「AI 強度」調它的強弱，其他滑桿都可以再調', 7000, { kind: 'ok', action: { label: '復原', fn: undo } });
   } catch (e) { // no model (offline, blocked): the formula auto tone, which needs nothing downloaded
     console.error(e); if (CUR() === im) { autoTone(); toast('AI 模型載入不了（' + (e.message || e) + '），已改用公式調整曝光與亮暗部', 6000, { action: { label: '復原', fn: undo } }); }
   }
