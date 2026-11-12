@@ -278,14 +278,24 @@ function profileParams(p) {
   }
   return q;
 }
-// index = the shader's style number: diffusion = white mist (Pro-Mist), blackmist = Black Pro-Mist, orton = Lightroom's Diffusion
-const GLOW_STYLES = [['diffusion', '白柔'], ['blackmist', '黑柔'], ['bloom', '綻放'], ['halation', '暈光'], ['motion', '動態'], ['streak', '光芒'], ['orton', '漫射']];
-const GLOW_ORDER = ['diffusion', 'blackmist', 'orton', 'bloom', 'halation', 'motion', 'streak']; // button order
+// Glow styles in button order. id = the style number FS_MAIN's glow block switches on; kind = how gl.js spreads the light:
+// 'mist' a filter point-spread function (GLOW_FAMILIES; all the light scatters, Range not used), 'pyramid' a band of blur levels
+// around Spread, 'halation' film-base bounces, 'dir' directional passes; thrMul raises the threshold (a streak: brightest points)
+const GLOW_STYLES = [
+  { k: 'diffusion', n: '白柔', id: 0, kind: 'mist' },      // white mist (Pro-Mist)
+  { k: 'blackmist', n: '黑柔', id: 1, kind: 'mist' },      // Black Pro-Mist
+  { k: 'orton', n: '漫射', id: 6, kind: 'pyramid' },       // Lightroom's Diffusion (Orton)
+  { k: 'bloom', n: '綻放', id: 2, kind: 'pyramid' },
+  { k: 'halation', n: '暈光', id: 3, kind: 'halation' },
+  { k: 'motion', n: '動態', id: 4, kind: 'dir' },
+  { k: 'streak', n: '光芒', id: 5, kind: 'dir', thrMul: 2 },
+];
+const glowStyle = k => GLOW_STYLES.find(s => s.k === k) || GLOW_STYLES[0];
 let glowUI = {};
 function refreshGlowUI() {
   if (!glowUI.seg) return; const im = CUR(), g = (im && im.params.glow) || DEFAULTS.glow;
-  [...glowUI.seg.children].forEach(b => b.classList.toggle('on', b.dataset.s === g.style));
-  glowUI.dirBox.style.display = g.style === 'motion' || g.style === 'streak' ? '' : 'none';
+  const s = glowStyle(g.style); [...glowUI.seg.children].forEach(b => b.classList.toggle('on', b.dataset.s === s.k));
+  glowUI.dirBox.style.display = s.kind === 'dir' ? '' : 'none'; glowUI.rangeBox.style.display = s.kind === 'mist' ? 'none' : '';
 }
 function refreshProfileUI() {
   const im = CUR(); if (!profileUI.chips) return; const cur = im ? (im.params.profile || 'color') : 'color';
@@ -782,10 +792,11 @@ function okHueRad(deg) { // interpolate unit vectors so the 359 -> 0 wrap is smo
   return Math.atan2(a[1] + (b[1] - a[1]) * f, a[0] + (b[0] - a[0]) * f);
 }
 function glowUniforms(g) {
-  const style = Math.max(0, GLOW_STYLES.findIndex(s => s[0] === g.style));
-  // threshold from Range: 0 = only the brightest highlights (about white), 100 = from about 2.5 EV under middle grey; streak: brighter
-  const range = g.range ?? 25, thr = 0.9 * Math.pow(2, -range / 100 * 4.5) * (style === 5 ? 2 : 1);
-  return { glowOn: g.amount > 0, glowA: [g.amount / 100, style, (g.warmth || 0) / 100, thr], glowP: { style, range, thr, spread: g.spread ?? 50, warmth: g.warmth || 0, dir: g.dir || 0, soft: g.soft ?? 30 } };
+  const s = glowStyle(g.style), range = g.range ?? 25;
+  // threshold from Range: 0 = only the brightest highlights (about white), 100 = from about 2.5 EV under middle grey. Mist filters
+  // scatter all the light (a tiny threshold keeps the soft step well defined).
+  const thr = s.kind === 'mist' ? 1e-4 : 0.9 * Math.pow(2, -range / 100 * 4.5) * (s.thrMul || 1);
+  return { glowOn: g.amount > 0, glowA: [g.amount / 100, s.id, (g.warmth || 0) / 100, thr], glowP: { style: s.id, key: s.k, kind: s.kind, thr, spread: g.spread ?? 50, warmth: g.warmth || 0, dir: g.dir || 0, soft: g.soft ?? 30 } };
 }
 function baseUniforms(p) {
   const t = p.temp / 100, ti = p.tint / 100;
@@ -934,16 +945,16 @@ function buildPanels() {
     if (SL[t.id]) { const h = hdr(t.name, el('button', { onclick: () => resetGroup(SL[t.id].map(s => s[0])) }, '重設')); nav.sections.push({ el: h, keys: SL[t.id].map(s => s[0]) }); sec.append(h); for (const s of SL[t.id]) sec.append(makeSlider(...s)); }
     if (t.id === 'fx') {
       // glow: style buttons and sliders; Direction / Softness only for the directional styles (as in Lightroom)
-      const GK = ['glow.amount', 'glow.range', 'glow.spread', 'glow.warmth', 'glow.dir', 'glow.soft'];
       const gh = hdr('光暈', el('button', { onclick: () => { const im = CUR(); if (!im) return; im.params.glow = clone(DEFAULTS.glow); refreshAll(); commit(); } }, '重設'));
       sec.append(gh); nav.sections.push({ el: gh, keys: ['glow'] });
       const seg = el('div', { class: 'seg full glowseg' }); glowUI.seg = seg;
-      GLOW_ORDER.map(k => GLOW_STYLES.find(s => s[0] === k)).forEach(([k, n]) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
+      GLOW_STYLES.forEach(({ k, n }) => seg.append(el('button', { 'data-s': k, onclick: () => { const im = CUR(); if (!im) return; im.params.glow = Object.assign({}, im.params.glow || DEFAULTS.glow, { style: k }); refreshGlowUI(); requestRender(true); commit(); } }, n)));
       sec.append(el('div', { class: 'row', style: 'margin:6px 0' }, seg));
-      sec.append(makeSlider('glow.amount', '強度', 0, 100, 1, fmt.pos), makeSlider('glow.range', '範圍（越高越多色調發光）', 0, 100, 1, fmt.pos),
+      glowUI.rangeBox = makeSlider('glow.range', '範圍（越高越多色調發光）', 0, 100, 1, fmt.pos);
+      sec.append(makeSlider('glow.amount', '強度', 0, 100, 1, fmt.pos), glowUI.rangeBox,
         makeSlider('glow.spread', '擴散', 0, 100, 1, fmt.pos), makeSlider('glow.warmth', '色溫', -100, 100, 1, fmt.int, 'linear-gradient(90deg,#6fa8ff,#888,#ffb347)'));
       glowUI.dirBox = el('div', {}, makeSlider('glow.dir', '方向', 0, 180, 1, fmt.deg), makeSlider('glow.soft', '柔和度', 0, 100, 1, fmt.pos)); sec.append(glowUI.dirBox);
-      sec.append(el('div', { class: 'hint' }, '白柔、黑柔：依真實柔焦鏡的散射模擬，強度 12.5／25／50／100 約等於 1/8、1/4、1/2、1 號濾鏡；範圍調高（80 以上）就像實體濾鏡，所有光都會散射。白柔是一層粉彩光霧、暗部變淡；黑柔光暈集中在亮處周圍、黑色維持深黑。漫射：Lightroom 的作法，夢幻、顏色變濃。綻放：亮光溢到周圍暗處。暈光：像底片，亮光旁的紅色版被曝光，邊緣自然泛紅（色溫：黃 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
+      sec.append(el('div', { class: 'hint' }, '白柔、黑柔：依真實柔焦鏡的散射模擬，所有光都會散射（不用「範圍」）；強度 25／50／75／100 對應 1/8、1/4、1/2、1 號濾鏡。白柔是一層粉彩光霧、暗部變淡；黑柔光暈集中在亮處周圍、黑色維持深黑；色溫調整光暈外圈的冷暖。漫射：Lightroom 的作法，夢幻、顏色變濃。綻放：亮光溢到周圍暗處。暈光：像底片，亮光旁的紅色版被曝光，邊緣自然泛紅（色溫：橘 ↔ 紅）。動態、光芒：沿一個方向拉出光。局部遮罩也能單獨調光暈強度。'));
     }
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
@@ -2285,7 +2296,7 @@ function redo() { const im = CUR(); if (!im || im.hi >= im.hist.length - 1) retu
 function updateUndoButtons() { const im = CUR(); $('#btnUndo').disabled = !im || im.hi <= 0; $('#btnRedo').disabled = !im || im.hi >= im.hist.length - 1; }
 let saveT; function saveEdits(im) { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem('rawedit:edit:' + im.key, JSON.stringify(stripAmount(im.params))); } catch { } }, 300); }
 function loadEdits(key) { try { const s = localStorage.getItem('rawedit:edit:' + key); return s ? mergeParams(JSON.parse(s)) : null; } catch { return null; } }
-function mergeParams(p) { const d = defaultParams(); const deep = (a, b) => { for (const k of Object.keys(b)) { if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k]) && a[k] && typeof a[k] === 'object') deep(a[k], b[k]); else a[k] = b[k]; } }; deep(d, p || {}); return d; }
+function mergeParams(p) { if (p && p.glow) p = Object.assign({}, p, { glow: migrateGlow(p.glow) }); const d = defaultParams(); const deep = (a, b) => { for (const k of Object.keys(b)) { if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k]) && a[k] && typeof a[k] === 'object') deep(a[k], b[k]); else a[k] = b[k]; } }; deep(d, p || {}); return d; }
 
 // ---------- rendering ----------
 const view = $('#view'), overlay = $('#overlay');
@@ -2865,7 +2876,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {

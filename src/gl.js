@@ -17,8 +17,8 @@ function lensSourcePts(T, x, y, W, H) {
 // White mist (Pro-Mist): broad halo, heavy bloom tail -> pastel veil; black mist (Black Pro-Mist): tight, halo-dominant, steep
 // tail and less light scattered -> punchy halos, deep blacks. warmth: warm outer halo / cool inner core.
 const GLOW_FAMILIES = {
-  0: { halo: 2.1, haloSpread: 2.0, bloom: 9.2, bloomSpread: 2.5, alpha: 2.9, wHalo: 0.58, warmth: 0.40 },
-  1: { halo: 1.35, haloSpread: 2.0, bloom: 5.4, bloomSpread: 2.5, alpha: 3.5, wHalo: 0.78, warmth: 0.65 },
+  diffusion: { halo: 2.1, haloSpread: 2.0, bloom: 9.2, bloomSpread: 2.5, alpha: 2.9, wHalo: 0.58, warmth: 0.40 },
+  blackmist: { halo: 1.35, haloSpread: 2.0, bloom: 5.4, bloomSpread: 2.5, alpha: 3.5, wHalo: 0.78, warmth: 0.65 },
 };
 // per-channel pyramid weights [r, g, b, a] for the glow settings P (each channel sums to 1 over the n levels)
 function glowLevelWeights(P, n) {
@@ -27,9 +27,10 @@ function glowLevelWeights(P, n) {
     const l = Math.min(n - 1, Math.max(0, Math.log2(Math.max(sigma, 1e-3) / 0.7))), i = Math.floor(l), f = l - i;
     for (const c of chans) { W[i][c] += w * (1 - f); W[Math.min(n - 1, i + 1)][c] += w * f; }
   };
-  const sc = Math.pow(2, (P.spread - 50) / 25), F = GLOW_FAMILIES[P.style];
+  const sc = Math.pow(2, (P.spread - 50) / 25), F = P.kind === 'mist' && GLOW_FAMILIES[P.key];
   if (F) {
-    const warm = Math.max(-1, Math.min(1, F.warmth + (P.warmth || 0) / 100)), A = [1.0, 0.35, -0.9];
+    // Warmth 0 = the family's own rim, -100 / +100 = fully cool / fully warm (no dead end on either side)
+    const w = (P.warmth || 0) / 100, warm = F.warmth + w * (w >= 0 ? 1 - F.warmth : 1 + F.warmth), A = [1.0, 0.35, -0.9];
     const hl = [-1, 0, 1].map(t => F.halo * sc * Math.pow(F.haloSpread, t));
     for (let c = 0; c < 3; c++) { // energy per channel kept: the warmth only moves red outwards and blue inwards
       const m = [-1, 0, 1].map(t => Math.max(0.05, 1 + A[c] * warm * t)), ms = m[0] + m[1] + m[2];
@@ -37,7 +38,7 @@ function glowLevelWeights(P, n) {
     }
     const bl = [0, 1, 2, 3].map(k => F.bloom * sc * Math.pow(F.bloomSpread, -1 + 2 * k / 3)), bw = bl.map(l => Math.pow(l, 2 - F.alpha)), bs = bw.reduce((a, b) => a + b, 0);
     bl.forEach((lam, k) => put(lam * 1.6, (1 - F.wHalo) * bw[k] / bs, [0, 1, 2]));
-  } else if (P.style === 3) {
+  } else if (P.kind === 'halation') {
     // halation: light reflected back from the film base, several bounces of sigma * sqrt(k), each half the last
     for (let k = 1; k <= 4; k++) put(3 * sc * Math.sqrt(k), Math.pow(0.5, k - 1), [0, 1, 2]);
   } else {
@@ -45,8 +46,7 @@ function glowLevelWeights(P, n) {
     const c = P.spread / 100 * (n - 1); for (let i = 0; i < n; i++) { const w = Math.exp(-((i - c) ** 2) / (2 * 1.2 * 1.2)); W[i][0] += w; W[i][1] += w; W[i][2] += w; }
   }
   for (let c = 0; c < 3; c++) { const s = W.reduce((a, w) => a + w[c], 0) || 1; for (const w of W) w[c] /= s; }
-  for (const w of W) w[3] = w[1];
-  return W;
+  return W; // alpha stays 0 (unused)
 }
 const DL_OFF = 4; // log2 luminance offset of the D-Lighting base (keeps I^2 small for half floats)
 class Renderer {
@@ -210,8 +210,9 @@ class Renderer {
   // given in the output frame, so a rotated or cropped photo keeps it).
   ensureGlow(U, src, m) {
     if (!U.glowOn || !this.floatRT) return;
-    const P = U.glowP, mm = m ? [m[0], m[1], m[3], m[4]].map(v => v.toFixed(3)).join(',') : '';
-    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.range, P.spread, P.warmth, P.dir, P.soft, mm].join('|');
+    // warmth only shapes the pyramid for mist filters (elsewhere it is a shader uniform); the output frame only for directional styles
+    const P = U.glowP, mm = P.kind === 'dir' && m ? [m[0], m[1], m[3], m[4]].map(v => v.toFixed(3)).join(',') : '';
+    const key = [src.ver ?? 'x', src.w, src.h, U.exposure.toFixed(4), U.wb.map(v => v.toFixed(4)).join(','), P.style, P.thr.toFixed(5), P.spread, P.kind === 'mist' ? P.warmth : '', P.kind === 'dir' ? [P.dir, P.soft].join(',') : '', mm].join('|');
     if (key === this.glowKey && this.glow) return;
     this.glowKey = key; this.buildGlow(U, src, m);
   }
@@ -235,7 +236,7 @@ class Renderer {
       if (w <= 4 || h <= 4) break;
     }
     let out;
-    if (P.style <= 3 || P.style === 6) {
+    if (P.kind !== 'dir') {
       // per-channel level weights from the style's point-spread function (glowLevelWeights)
       const n = levels.length, LW = glowLevelWeights(P, n);
       let up = levels[n - 1];
@@ -247,15 +248,17 @@ class Renderer {
       }
       out = up;
     } else {
-      // motion / streak along Direction (degrees, output frame) at 256 px: passes with steps 1, 4, 16, 64 texels (Spread sets the
-      // length), then Softness widens the line across (a streak stays thin)
+      // motion / streak along Direction (degrees, output frame) at 256 px: 7-tap passes with steps 1, 3, 9, 27 ... texels, as many
+      // as the length from Spread allows (Spread 0 ~ 8 %, 100 ~ 60 % of the frame along the direction); a step never puts a tap more
+      // than 45 % of the texture away, so no pass reads the clamped border. Softness then widens the line across (a streak stays thin).
       const s1 = levels[1], th = P.dir * Math.PI / 180; let dx = Math.cos(th), dy = Math.sin(th);
       if (m) { const fx = m[0] * dx + m[3] * dy, fy = m[1] * dx + m[4] * dy, l = Math.hypot(fx, fy) || 1; dx = fx / l; dy = fy / l; }
       const A = this._glowTarget('DA', s1.w, s1.h), B = this._glowTarget('DB', s1.w, s1.h);
-      const along = 2 + Math.round(P.spread / 100 * 3), across = Math.round(P.soft / 100 * (P.style === 5 ? 1 : 3));
+      const ext = Math.abs(dx) * s1.w + Math.abs(dy) * s1.h, reach = Math.min((0.08 + 0.52 * P.spread / 100) * ext, 0.45 * ext);
+      const across = Math.round(P.soft / 100 * (P.key === 'streak' ? 1 : 3));
       let from = s1, to = A;
       const pass = (sx, sy) => { const f = from; draw(this.progGDir, to, u => { bind(0, f.tex, u.u_tex); gl.uniform2f(u.u_step, sx / s1.w, sy / s1.h); }); from = to; to = to === A ? B : A; };
-      for (let i = 0; i < along; i++) { const st = Math.pow(4, i); pass(dx * st, dy * st); }
+      for (let st = 1, i = 0; i === 0 || 3 * st <= reach; st *= 3, i++) pass(dx * st, dy * st);
       for (let i = 0; i < across; i++) { const st = Math.pow(3, i); pass(-dy * st, dx * st); }
       out = from;
     }

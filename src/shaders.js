@@ -122,11 +122,10 @@ void main(){
   o = vec4(a1, m.x - a1*m.x, a2, m.z - a2*m.z);
 }`;
 
-// Glow (Lightroom 2026's Glow: diffusion, bloom, halation, motion, streak). Light above a threshold is taken from the source in
-// scene-linear terms (exposure and white balance applied), blurred at low resolution and added back before the tone map, the
-// way scattered light adds to a real exposure: bright glows roll off in the shoulder instead of clipping flat.
-// Pass G1: bright pass, 4x4 samples per texel, each weighted by a soft threshold before averaging (so a small light still glows);
-// alpha = all the light (luminance, no threshold), blurred along for the veil of a white mist filter
+// Glow (Lightroom 2026's Glow plus mist filters). Light above a threshold (all of it for mist filters) is taken from the source
+// in scene-linear terms (exposure and white balance applied), blurred at low resolution and composited before exposure and the
+// tone map, the way scattered light is part of the recorded exposure: bright glows roll off in the shoulder instead of clipping.
+// Pass G1: bright pass, 4x4 samples per texel, each weighted by a soft threshold before averaging (so a small light still glows)
 const FS_GBRIGHT = `#version 300 es
 precision highp float; precision highp usampler2D;
 uniform usampler2D u_src; uniform vec2 u_srcSize, u_outSize; uniform vec3 u_gain; uniform vec2 u_thr; // threshold, knee
@@ -134,21 +133,21 @@ out vec4 o;
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 void main(){
   vec2 fp = u_srcSize/u_outSize, p0 = floor(gl_FragCoord.xy)*fp; ivec2 sz = ivec2(u_srcSize);
-  vec3 acc = vec3(0.0); float tot = 0.0;
+  vec3 acc = vec3(0.0);
   for(int j=0;j<4;j++) for(int i=0;i<4;i++){
     ivec2 q = clamp(ivec2(p0 + (vec2(i,j)+0.5)*fp*0.25), ivec2(0), sz-1);
     vec3 c = vec3(texelFetch(u_src,q,0).rgb)/65535.0*u_gain; float L = dot(c, LUMA);
-    acc += min(c, vec3(32.0))*smoothstep(u_thr.x*(1.0-u_thr.y), u_thr.x*(1.0+u_thr.y), L); tot += min(L, 8.0);
+    acc += min(c, vec3(32.0))*smoothstep(u_thr.x*(1.0-u_thr.y), u_thr.x*(1.0+u_thr.y), L);
   }
-  o = vec4(acc, tot)/16.0;
+  o = vec4(acc/16.0, 0.0);
 }`;
 // Pass G2: 2x downsample, 4 bilinear taps (a 4x4 footprint)
 const FS_GDOWN = `#version 300 es
 precision highp float;
 uniform sampler2D u_tex; uniform vec2 u_texel; in vec2 v_uv; out vec4 o;
 void main(){ o = 0.25*(texture(u_tex, v_uv+u_texel*vec2(-1.0,-1.0)) + texture(u_tex, v_uv+u_texel*vec2(1.0,-1.0)) + texture(u_tex, v_uv+u_texel*vec2(-1.0,1.0)) + texture(u_tex, v_uv+u_texel*vec2(1.0,1.0))); }`;
-// Pass G3: progressive upsampling: tent-filtered coarser result plus this level's own light (per-channel weights u_k: rgb from
-// Spread, alpha - the white-mist veil - always from the coarsest levels, i.e. light scattered over most of the frame)
+// Pass G3: progressive upsampling: tent-filtered coarser result plus this level's own light (per-channel weights u_k from the
+// style's point-spread function, see glowLevelWeights in gl.js; u_kl scales the coarsest level on the first step)
 const FS_GUP = `#version 300 es
 precision highp float;
 uniform sampler2D u_low, u_cur; uniform vec2 u_texel; uniform vec4 u_k, u_kl; in vec2 v_uv; out vec4 o;
@@ -232,7 +231,7 @@ uniform vec4  u_mE[8];          // colour range: picked oklab a, b, L and radius
 uniform vec4  u_mF[8];          // hue shift, noise reduction, colour overlay a, b (oklab, already scaled)
 uniform float u_mGlow[8];       // glow amount per mask
 uniform sampler2D u_glow;       // glow light (scene-linear, blurred), see FS_GBRIGHT..FS_GDIR
-uniform vec4  u_glowA;          // glow amount, style (0 white mist, 1 black mist, 2 bloom, 3 halation, 4 motion, 5 streak, 6 Lightroom diffusion), warmth -1..1, threshold
+uniform vec4  u_glowA;          // glow amount, style id (GLOW_STYLES in app.js), warmth -1..1, threshold
 uniform int   u_anyCR;          // any mask uses a colour range
 uniform vec4  u_pcA[4];         // point colour: picked oklab L, a, b and radius
 uniform vec4  u_pcB[4];         // point colour: hue shift, saturation, luminance (-1..1)
@@ -299,6 +298,15 @@ vec3 gamutHi(vec3 c, float g){
   return c;
 }
 float invSmooth(float x){ return 0.5 - sin(asin(1.0 - 2.0*clamp(x,0.0,1.0))/3.0); }
+// Mist filter: fraction of the light deflected for glow amount ga (x100 = 25 / 50 / 75 / 100 -> filter grade 1/8, 1/4, 1/2, 1, one
+// grade per 25; 10 / 20 / 35 / 55 / 75 % at grades 1/8 ... 2, after spektrafilm's grade table; linear below 1/8), times the family's
+// deflection gain and the share leaving the sharp core (white 1.05 x 0.72, black 0.75 x 0.60): white 7.6 / 15 / 26 / 42 %,
+// black 4.5 / 9 / 16 / 25 % actually spread.
+float mistFraction(float ga, int st){
+  float a = ga*100.0, x = clamp((a - 25.0)/25.0, 0.0, 4.0);
+  float ps = a < 25.0 ? 0.1*a/25.0 : x < 1.0 ? mix(0.10, 0.20, x) : x < 2.0 ? mix(0.20, 0.35, x - 1.0) : x < 3.0 ? mix(0.35, 0.55, x - 2.0) : mix(0.55, 0.75, x - 3.0);
+  return ps*(st == 0 ? 0.756 : 0.45);
+}
 
 void main(){
   vec2 outPx = v_uv*u_outSize;
@@ -379,6 +387,36 @@ void main(){
   vec3 lwb = max(vec3(1.0 + 0.45*lTemp, 1.0 - 0.25*lTint, 1.0 - 0.45*lTemp), vec3(0.05)); lwb /= dot(lwb, LUMA);
   float lMul = exp2(lExp);
 
+  // --- glow: scattered light, added in the units of the glow texture (source x exposure x white balance, before the lens
+  // vignetting gain), so this pixel is compared like for like; the scattered light then gets vignetting correction, exposure,
+  // local adjustments, D-Lighting, calibration and dehaze like the rest of the recorded light. Scattering moves light: each
+  // style adds (blurred light - this pixel's own light that scatters), so a large evenly bright area (a white dress) keeps its
+  // level and the glow shows where brightness changes. ---
+  float ga = u_glowA.x + lGlow;
+  if(ga > 0.001){
+    vec3 ew = max(u_exposure*u_wb, vec3(1e-6)), cs = c/max(vgain, 1e-4)*ew;
+    vec3 g = texture(u_glow, srcG/u_fullSize).rgb, hl = min(cs, vec3(32.0))*smoothstep(u_glowA.w*0.5, u_glowA.w*1.5, dot(cs, LUMA)), d = g - hl;
+    float wm = u_glowA.z; int st = int(u_glowA.y + 0.5);
+    vec3 tint = max(vec3(1.0 + 0.35*wm, 1.0, 1.0 - 0.35*wm), vec3(0.0)); tint /= dot(tint, LUMA);
+    vec3 add;
+    if(st <= 1) add = d*mistFraction(ga, st);                                  // mist filters (warm rim: per-channel pyramid weights)
+    else if(st == 6){
+      // Lightroom-style diffusion (Orton): a blurred, a little brighter and more saturated copy blended in - dreamy, colour-rich;
+      // the saturation boost is floored at 0 (a saturated light would otherwise go negative in its weak channels)
+      float gl = dot(g, LUMA); vec3 gs = max(vec3(gl) + (g - vec3(gl))*(1.0 + 0.6*min(ga, 1.0)), vec3(0.0));
+      add = (gs*1.25*tint - hl)*clamp(ga*0.5, 0.0, 0.8);
+    }
+    else if(st == 2) add = mix(vec3(dot(d, LUMA)), d, 0.6)*tint*ga*0.45;      // bloom: wider spill, less saturated
+    else if(st == 3){
+      // halation: light reflected off the film base is extra exposure of the red layer (a little the green, not the blue) around
+      // bright sources - added where the surroundings are brighter than the pixel, never taken from the source itself (taking it
+      // turned bright details cyan and dark ones orange); Warmth moves the green share from orange (0.3) to deep red (0)
+      float h = clamp(ga*0.6, 0.0, 1.0), cg = mix(0.3, 0.0, wm*0.5 + 0.5);
+      add = vec3(h*max(d.r, 0.0), h*cg*max(d.g, 0.0), 0.0);
+    }
+    else add = max(d, vec3(0.0))*tint*ga*0.8;                                 // motion / streak: light drawn out of the sources
+    c += add/ew*vgain;
+  }
   // --- D-Lighting: local exposure from the edge-aware base (dark surroundings lifted, bright ones held back) ---
   float dlGain = 1.0;
   if(u_dl.x > 0.001){
@@ -409,38 +447,6 @@ void main(){
     c = max(c, 0.0);
   }
 
-  // --- glow: blurred light added in scene-linear terms (before the tone map's shoulder) ---
-  float ga = u_glowA.x + lGlow;
-  if(ga > 0.001){
-    // Scattering moves light, it does not add any: each style adds (blurred light - this pixel's own light that scatters), so a
-    // large evenly bright area (a white dress) keeps its level and the glow shows where brightness changes - halos around
-    // highlights, a little light taken from the sharp highlight itself. The glow texture is pre-D-Lighting, so is the comparison.
-    vec4 gt = texture(u_glow, srcG/u_fullSize)*lMul; vec3 g = gt.rgb; float wm = u_glowA.z; int st = int(u_glowA.y + 0.5);
-    vec3 cp = c/max(dlGain, 1e-3), hl = min(cp, vec3(32.0))*smoothstep(u_glowA.w*0.5, u_glowA.w*1.5, dot(cp, LUMA)), d = g - hl;
-    vec3 tint = st == 3 ? mix(vec3(1.0, 0.62, 0.25), vec3(1.0, 0.24, 0.1), wm*0.5 + 0.5) : max(vec3(1.0 + 0.35*wm, 1.0, 1.0 - 0.35*wm), vec3(0.0));
-    tint /= dot(tint, LUMA);
-    if(st <= 1){
-      // mist filters: a fraction p of the light is deflected into the filter's point-spread function (halo + r^-alpha tail,
-      // warm rim built into the per-channel pyramid weights). p follows the commercial grades - 1/8 ~ 10 %, 1/4 ~ 20 %,
-      // 1/2 ~ 35 %, 1 ~ 55 % (amount 12.5 / 25 / 50 / 100) - times the share that leaves the sharp core; black mist deflects less
-      float p = 0.55*pow(clamp(ga, 0.0, 2.0), 0.68)*(st == 0 ? 0.76 : 0.45);
-      c += d*p*dlGain;
-    }
-    else if(st == 6){
-      // Lightroom-style diffusion (Orton): a blurred, a little brighter and more saturated copy blended in - dreamy, colour-rich
-      vec3 gs = vec3(dot(g, LUMA)) + (g - vec3(dot(g, LUMA)))*(1.0 + 0.6*ga);
-      c += (gs*1.25*tint - hl)*clamp(ga*0.5, 0.0, 0.8)*dlGain;
-    }                                                 // black mist: highlights only, blacks and contrast kept
-    else if(st == 2) c += mix(vec3(dot(d, LUMA)), d, 0.6)*tint*ga*0.45*dlGain;                      // bloom: wider spill, less saturated
-    else if(st == 3){
-      // halation: light reflected off the film base is extra exposure of the red layer (a little the green, not the blue) around
-      // bright sources - added where the surroundings are brighter than the pixel, never taken from the source itself (taking it
-      // turned bright details cyan and dark ones orange); Warmth moves the green share from orange (0.3) to deep red (0)
-      float h = clamp(ga*0.6, 0.0, 1.0), cg = mix(0.3, 0.0, wm*0.5 + 0.5);
-      c.r += h*max(d.r, 0.0)*dlGain; c.g += h*cg*max(d.g, 0.0)*dlGain;
-    }
-    else c += max(d, vec3(0.0))*tint*ga*0.8*dlGain;                                            // motion / streak: light drawn out of the sources
-  }
   // --- base tone map for RAW (from LightCraft, MIT): extended Reinhard on luminance, white point 2.9 EV over middle grey,
   // ratio preserving, then highlight desaturation above 1. Gives a soft film-like shoulder instead of hard clipping. ---
   if(u_baseTone == 1){
