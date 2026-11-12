@@ -96,7 +96,7 @@ node build.js   # 把 src/ 與 src/vendor/libraw.wasm 打包成 RawEditor.html
 
 這一版照 Lightroom 的修圖功能補齊，大部分演算法參考 [LightCraft](https://github.com/storytold/lightcraft)（MIT）：
 
-- **光線**：描述檔（色彩、中性、鮮豔、風景、人像、單色、平淡）與強度；RAW 有類似 Lightroom 的基礎色調曲線（亮部柔和過渡）；「自動」一鍵調整。
+- **光線**：描述檔（色彩、中性、鮮豔、風景、人像、單色、平淡）與強度；RAW 有類似 Lightroom 的基礎色調曲線（亮部柔和過渡）；「自動」一鍵讓 AI 修圖（在裝置上跑，不上傳；模型載入不了時改用公式調整曝光與亮暗部）。
 - **白平衡**：原廠、自動、吸管（點一下應該是白或灰的地方）。
 - **曲線**：區域曲線（亮部／亮調／暗調／陰影＋三個分界）加上 RGB、紅、綠、藍點曲線。
 - **顏色**：HSL、點顏色（吸取顏色後單獨調整）、色調分級三區＋整體色輪與混合、相機校正（陰影色調、紅綠藍原色）。
@@ -124,4 +124,4 @@ LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colo
 
 ## AI 修圖
 
-「AI 修圖」uses the Image-Adaptive 3D LUT model (Zeng et al., TPAMI 2020, https://github.com/HuiZeng/Image-Adaptive-3DLUT, Apache-2.0; weights trained on MIT-Adobe FiveK, for personal non-commercial use). `models/ai3dlut.onnx` is the classifier exported to ONNX, `models/ai3dlut.bin` the three basis LUTs. It runs in the browser; nothing is uploaded.
+「自動」(光線分頁) uses the Image-Adaptive 3D LUT model (Zeng et al., TPAMI 2020, https://github.com/HuiZeng/Image-Adaptive-3DLUT, Apache-2.0; weights trained on MIT-Adobe FiveK, for personal non-commercial use). `models/ai3dlut.onnx` is the classifier exported to ONNX, `models/ai3dlut.bin` the three basis LUTs. It runs in the browser; nothing is uploaded.

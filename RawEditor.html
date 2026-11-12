@@ -4136,11 +4136,10 @@ function buildPanels() {
     if (t.id === 'light') {
       const pr = el('div', { class: 'chips profchips' }); profileUI.chips = pr;
       for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
-      const auto = el('button', { class: 'primary', onclick: () => autoTone() }, '自動');
+      const auto = el('button', { class: 'primary', title: 'AI 依它自己的喜好修這張照片（在這台裝置上跑，不上傳）；模型載入不了時改用公式調整曝光與亮暗部', onclick: () => aiRetouch() }, '自動');
       const cam = el('button', { title: '讓顏色和亮度接近相機拍出來的 JPEG', onclick: () => cameraLookButton() }, '相機色調');
-      const ai = el('button', { title: 'AI 依它自己的喜好修這張照片（在這台裝置上跑，不上傳）', onclick: () => aiRetouch() }, 'AI 修圖');
       const ref = el('button', { title: '選一張照片：同一張照片（裁切、轉正、修過都可以）就逐格對齊它的顏色；不同的照片就套用它的色調風格', onclick: () => referenceJpegButton() }, '參考照片');
-      sec.insertBefore(el('div', {}, hdr('描述檔', ai, ref, cam, auto), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%'), makeSlider('camColor', '色彩對齊', 0, 100, 1, v => Math.round(v) + '%')), sec.children[0]);
+      sec.insertBefore(el('div', {}, hdr('描述檔', ref, cam, auto), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%'), makeSlider('camColor', '色彩對齊', 0, 100, 1, v => Math.round(v) + '%')), sec.children[0]);
     }
     if (t.id === 'color') {
       const wbBar = el('div', { class: 'toolbar wbbar' }, el('span', { class: 'hint' }, '白平衡'),
@@ -5154,7 +5153,7 @@ async function loadRetouchModel() {
 }
 async function aiRetouch() {
   const im = CUR(); if (!im || !state.previewData || state.previewData.imId !== im.id) return;
-  status('AI 修圖中…（第一次要下載約 2.4 MB 的模型）');
+  status('自動修圖中…（第一次要下載約 2.4 MB 的模型）');
   try {
     const M = await loadRetouchModel(), ort = AI.ort, N = CAM_LUT_N, NN = N * N * N; if (CUR() !== im) return;
     const np = clone(defaultsFor(im)); for (const k of ['geo', 'masks', 'spots', 'lens', 'sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor']) np[k] = clone(im.params[k]);
@@ -5170,8 +5169,10 @@ async function aiRetouch() {
     const id = 'ai' + Date.now().toString(36); await saveRefLut(id, L, Math.max(REF_CAP, mx * 1.01)); if (CUR() !== im) return;
     np.lutRef = id; np.camColor = 100; im.params = np; im.presetId = null; refreshAll(); commit();
     aiRetouch.last = { w: Array.from(w).map(v => +v.toFixed(3)), mx: +mx.toFixed(3) };
-    toast('AI 已依它的喜好修圖。「色彩對齊」是它的強度，其他滑桿都可以再調', 7000, { kind: 'ok', action: { label: '復原', fn: undo } });
-  } catch (e) { console.error(e); toast('AI 修圖無法使用（' + (e.message || e) + '）', 5000, { kind: 'err' }); }
+    toast('自動：AI 已依它的喜好修圖。「色彩對齊」是它的強度，其他滑桿都可以再調', 7000, { kind: 'ok', action: { label: '復原', fn: undo } });
+  } catch (e) { // no model (offline, blocked): the formula auto tone, which needs nothing downloaded
+    console.error(e); if (CUR() === im) { autoTone(); toast('AI 模型載入不了（' + (e.message || e) + '），已改用公式調整曝光與亮暗部', 6000, { action: { label: '復原', fn: undo } }); }
+  }
   finally { status(''); if (CUR()) renderer.setCurveLUT(curveLUTFor(CUR().params)); }
 }
 // 「光束（AI）」: a shaft of light as a radial mask. The saliency model finds what the picture is about (a person, an object, a building); the light
