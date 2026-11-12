@@ -14,6 +14,8 @@ const DEFAULTS = ({
   calib: { shadow: 0, rh: 0, rs: 0, gh: 0, gs: 0, bh: 0, bs: 0 },
   // profile: base rendering + slider deltas applied under the user's sliders (see PROFILES in app.js); amount 0..200 %
   profile: 'color', profileAmt: 100, camColor: 0,
+  // camColor's LUT: '' = fitted to the camera's embedded JPEG, otherwise the id of one fitted to a reference photo (see saveRefLut)
+  lutRef: '',
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
   // glow (Lightroom 2026 + mist filters): style diffusion (white mist) | blackmist | orton (Lightroom's Diffusion) | bloom | halation |
   // motion | streak; amount (mist: 25 / 50 / 75 / 100 = filter grade 1/8 ... 1); range = how far down the tones it starts (not for mist),

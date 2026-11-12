@@ -1660,6 +1660,8 @@ const DEFAULTS = ({
   calib: { shadow: 0, rh: 0, rs: 0, gh: 0, gs: 0, bh: 0, bs: 0 },
   // profile: base rendering + slider deltas applied under the user's sliders (see PROFILES in app.js); amount 0..200 %
   profile: 'color', profileAmt: 100, camColor: 0,
+  // camColor's LUT: '' = fitted to the camera's embedded JPEG, otherwise the id of one fitted to a reference photo (see saveRefLut)
+  lutRef: '',
   vigRound: 0, vigHi: 0, grainRough: 50, sharpenMask: 0,
   // glow (Lightroom 2026 + mist filters): style diffusion (white mist) | blackmist | orton (Lightroom's Diffusion) | bloom | halation |
   // motion | streak; amount (mist: 25 / 50 / 75 / 100 = filter grade 1/8 ... 1); range = how far down the tones it starts (not for mist),
@@ -3311,7 +3313,7 @@ const zeroHSL = () => ({ h: new Array(8).fill(0), s: new Array(8).fill(0), l: ne
 const LOOK_EXTRA = ['vibrance', 'clarity', 'texture', 'dehaze', 'grade', 'sharpen', 'sharpenRadius', 'sharpenMask', 'dlighting'];
 function clearCameraLook(p, im) {
   const d = defaultsFor(im); for (const [k] of LOOK_KEYS) p[k] = 0; if (im && im.lookSrc === 'camera') for (const k of LOOK_EXTRA) p[k] = clone(d[k]);
-  p.hsl = zeroHSL(); p.camColor = 0; p.lens = Object.assign({}, p.lens, { manVig: 0 });
+  p.hsl = zeroHSL(); p.camColor = 0; p.lutRef = ''; p.lens = Object.assign({}, p.lens, { manVig: 0 });
 }
 // put fitted values into params: plain keys, hsl replaced, lens merged (only manVig is part of the look)
 function mergeLook(p, v) { for (const [k, x] of Object.entries(v)) p[k] = k === 'lens' ? Object.assign({}, p.lens, x) : clone(x); return p; }
@@ -3335,12 +3337,18 @@ const CAM_LUT_N = 33; // 33^3: finer than film LUTs so a face in shade and dark 
 // cell pair votes for the 8 lattice nodes around its colour; a smoothness term fills the gaps and nodes far from any sample
 // decay back to "no change". Pairs the first solution cannot explain (cells that still do not line up) are dropped and it
 // is solved again; offsets are capped. The per-photo version of a camera profile's look table (Adobe) / colour LUT (darktable).
-function fitCamLUT(A, B, N = CAM_LUT_N, lam = 0.5, total = 20000) {
-  const M = N - 1, nodes = N * N * N, n = A.sd.length, wt = new Float32Array(n);
+// o.cap: largest offset (0.2); o.skip: cells left out (cross-validation, fitCamLUTCV)
+function camLutWeights(A, B) {
+  const n = A.sd.length, wt = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     if (A.clip[i] > 0.2 || B.clip[i] > 0.2) continue;
     const v = A.sd[i] * A.sd[i] + B.sd[i] * B.sd[i]; wt[i] = Math.exp(-v / (2 * 0.035 * 0.035));
   }
+  return wt;
+}
+function fitCamLUT(A, B, N = CAM_LUT_N, lam = 0.5, total = 20000, o = {}) {
+  const M = N - 1, nodes = N * N * N, n = A.sd.length, wt = camLutWeights(A, B), cap = o.cap ?? 0.2;
+  if (o.skip) for (let i = 0; i < n; i++) if (o.skip[i]) wt[i] = 0;
   const corner = (i, f) => { const p = [0, 1, 2].map(j => Math.min(M - 1e-6, Math.max(0, A.rgb[i * 3 + j] * M))), q = p.map(v => v | 0); return f(q, p.map((v, j) => v - q[j])); };
   const solve = () => {
     const acc = new Float64Array(nodes * 3), ws = new Float64Array(nodes); let tot = 0;
@@ -3361,7 +3369,7 @@ function fitCamLUT(A, B, N = CAM_LUT_N, lam = 0.5, total = 20000) {
         const nb = j => { s0 += off[j * 3]; s1 += off[j * 3 + 1]; s2 += off[j * 3 + 2]; c++; };
         if (r > 0) nb(k - 1); if (r < M) nb(k + 1); if (g > 0) nb(k - N); if (g < M) nb(k + N); if (b > 0) nb(k - N * N); if (b < M) nb(k + N * N);
         const den = ws[k] + lam * c + mu;
-        for (let j = 0; j < 3; j++) nx[k * 3 + j] = Math.max(-0.2, Math.min(0.2, (acc[k * 3 + j] + lam * [s0, s1, s2][j]) / den));
+        for (let j = 0; j < 3; j++) nx[k * 3 + j] = Math.max(-cap, Math.min(cap, (acc[k * 3 + j] + lam * [s0, s1, s2][j]) / den));
       }
       [off, nx] = [nx, off];
     }
@@ -3432,14 +3440,15 @@ function alignJpeg(ourPx, w, h, src, sw, sh) {
 // bands present in the photo, matched cell by cell. Cameras render each hue their own way (greens, skies, reds...), which
 // global temperature / tint / saturation cannot reproduce (Adobe's look tables and darktable's colour LUT play this role).
 // opts.lookVals: only rebuild the camera colour LUT for already fitted values (a photo fitted in an earlier session).
+// opts.target: a reference of the same picture instead of the embedded JPEG (「參考照片」, already resampled into our axes), opts.crop:
+// the part of the default framing it covers. Then a tone curve is fitted after the sliders, and the LUT's smoothing is cross-validated.
 // opts.cameraLook: values from the camera's written settings; exposure, temperature, tint, highlights, whites, D-Lighting and
 // the corners are fitted on top of them, then the skin-relevant HSL bands (skin cells count 3x), and no LUT is made.
 // The LUT comes back as vals._lut (take it with takeLut before storing the values).
 async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   let bm;
   try {
-    const blob = await (await fetch(im.thumbBlobUrl)).blob();
-    bm = await createImageBitmap(blob, { resizeWidth: 256, resizeQuality: 'high' });
+    bm = opts.target ? await createImageBitmap(opts.target) : await createImageBitmap(await (await fetch(im.thumbBlobUrl)).blob(), { resizeWidth: 256, resizeQuality: 'high' });
     if (bm.width < 64 || bm.height < 32) { bm.close(); return null; }
   } catch (e) { console.warn('camera look: no usable embedded JPEG', e); return null; }
   if (isStale()) { bm.close(); return null; }
@@ -3448,7 +3457,9 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
   const FW = swap ? src.w * src.scale : im.fullW, FH = swap ? src.h * src.scale : im.fullH, imx = swap ? Object.assign({}, im, { fullW: FW, fullH: FH }) : im;
   // always compared from the defaults (full frame, nothing else applied): the embedded JPEG is the whole frame, and the user's
   // own edits must not end up inside the camera look or its LUT
-  const base = opts.cameraLook ? mergeLook(clone(defaultsFor(im)), opts.cameraLook) : clone(defaultsFor(im)), G = geometry(base.geo, FW, FH);
+  const base = opts.cameraLook ? mergeLook(clone(defaultsFor(im)), opts.cameraLook) : clone(defaultsFor(im));
+  if (opts.crop) base.geo = Object.assign({}, base.geo, { crop: opts.crop, aspect: 'free' }); // a reference covering part of the frame
+  const G = geometry(base.geo, FW, FH);
   renderer.setCurveLUT(curveLUTFor(base));
   const ow = 192, oh = Math.max(8, Math.round(192 * G.outH / G.outW)), gw = LOOK_GW, gh = Math.max(4, Math.round(LOOK_GW * G.outH / G.outW));
   const statsFor = p => { const U = uniformsFromParams(p, imx, {}); U.showMask = -1; U.clipWarn = 0; const r = renderer.readSmall(U, G, ow, 'look'); return lookStats(r.px, r.w, r.h, gw, gh); };
@@ -3475,9 +3486,9 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
       const UA = uniformsFromParams(with1(K1.map(() => 0)), imx, {}); UA.showMask = -1; UA.clipWarn = 0; const rA = renderer.readSmall(UA, G, 128, 'look');
       al = alignJpeg(rA.px, rA.w, rA.h, jpx, jw, jh); target = lookStats(warpJpeg(jpx, jw, jh, ow, oh, al.t), ow, oh, gw, gh); best = Math.max(best, gridCorrL(plain.grid, target.grid));
     }
-    const aligned = best > 0.8 && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04;
+    const aligned = best > (opts.target ? 0.6 : 0.8) && Math.abs(arJ / (G.outW / G.outH) - 1) < 0.04; // a located reference may be graded hard
     const info = { corr: +best.toFixed(3), aligned, align: { s: +al.t.s.toFixed(3), k: al.t.k, dx: al.t.dx, dy: al.t.dy, edge: +al.corr.toFixed(3), edge0: +al.corr0.toFixed(3) } }; fitCameraLook.last = info;
-    if (aligned) K1 = [...KB, ['lens.manVig', -30, 50, 8, 20]];
+    if (aligned && !(opts.crop && opts.crop.w * opts.crop.h < 0.8)) K1 = [...KB, ['lens.manVig', -30, 50, 8, 20]]; // corners: only when they are the frame's
     if (opts.cameraLook) target.sw = skinWeights(target.grid);
     let vals;
     if (opts.lookVals) vals = clone(opts.lookVals);
@@ -3520,12 +3531,19 @@ async function fitCameraLook(im, src, isStale = () => false, opts = {}) {
     if (opts.cameraLook || !aligned || isStale()) return vals;
     // camera colour: a 3D LUT from our rendering with these values to the JPEG, from uniform cells at 256 px. Per colour,
     // so skin, foliage and a light blue dress each land where the camera put them; HSL stays free for the user.
-    const pL = mergeLook(Object.assign({}, base), vals); pL.camColor = 0;
+    if (opts.target && !opts.lookVals) { // the reference's tone curve on top of the sliders, from the cells that pair up
+      const pC = mergeLook(Object.assign({}, base), vals); pC.camColor = 0; renderer.setCurveLUT(curveLUTFor(pC));
+      const UC = uniformsFromParams(pC, imx, {}); UC.showMask = -1; UC.clipWarn = 0; const rC = renderer.readSmall(UC, G, 256, 'look'), jC = warpJpeg(jpx, jw, jh, rC.w, rC.h, al.t);
+      const cw = 64, ch = Math.max(4, Math.round(cw * rC.h / rC.w)), pts = curveFromPairs(cellRGB(rC.px, rC.w, rC.h, cw, ch), cellRGB(jC, rC.w, rC.h, cw, ch));
+      if (pts) { vals.curves = clone(DEFAULTS.curves); vals.curves.rgb = pts; } info.curve = pts;
+    }
+    const pL = mergeLook(Object.assign({}, base), vals); pL.camColor = 0; renderer.setCurveLUT(curveLUTFor(pL));
     const UL = uniformsFromParams(pL, imx, {}); UL.showMask = -1; UL.clipWarn = 0; const rL = renderer.readSmall(UL, G, 256, 'look');
     const jL = warpJpeg(jpx, jw, jh, rL.w, rL.h, al.t);
-    const cw = opts.lutCells || 128, ch = Math.max(4, Math.round(cw * rL.h / rL.w));
-    Object.defineProperty(vals, '_lut', { value: fitCamLUT(cellRGB(rL.px, rL.w, rL.h, cw, ch), cellRGB(jL, rL.w, rL.h, cw, ch), opts.lutN || CAM_LUT_N, opts.lutLam ?? 0.5, opts.lutTotal || 20000), enumerable: false, configurable: true });
-    vals.camColor = 100; info.ms = Math.round(performance.now() - t0);
+    const cw = opts.lutCells || 128, ch = Math.max(4, Math.round(cw * rL.h / rL.w)), cA = cellRGB(rL.px, rL.w, rL.h, cw, ch), cB = cellRGB(jL, rL.w, rL.h, cw, ch);
+    const lut = opts.target ? fitCamLUTCV(cA, cB, cw, opts.lutN || CAM_LUT_N, opts.lutTotal || 20000, REF_CAP, info) : fitCamLUT(cA, cB, opts.lutN || CAM_LUT_N, opts.lutLam ?? 0.5, opts.lutTotal || 20000);
+    if (lut) Object.defineProperty(vals, '_lut', { value: lut, enumerable: false, configurable: true });
+    vals.camColor = lut ? 100 : 0; info.ms = Math.round(performance.now() - t0);
     return vals;
   } finally {
     bm.close();
@@ -3551,7 +3569,7 @@ async function cameraLookButton() {
   if (im.camSettings) { // the camera wrote its settings: put them back, matched to the JPEG again
     status('比對相機 JPEG 的亮度、白平衡與膚色…'); const v = await fitCameraSettingsLook(im, null); status('');
     if (CUR() !== im) return; if (!v) { im.look = lookFromCameraSettings(im.camSettings); im.lookFitted = false; }
-    clearCameraLook(im.params, im); im.lookSrc = 'camera'; im.camLut = null; renderer.setCamLUT(null, CAM_LUT_N);
+    clearCameraLook(im.params, im); im.lookSrc = 'camera'; im.camLut = null; renderer.setCamLUT(activeLut(im), CAM_LUT_N);
     mergeLook(im.params, im.look); im.presetId = null; refreshAll(); commit(); showInfo(); toast('已套用相機寫入的設定：' + camSettingsName(im)); return;
   }
   if (!im.thumbBlobUrl) { toast('這個 RAW 檔裡沒有相機 JPEG 預覽，無法比對'); return; }
@@ -3559,8 +3577,335 @@ async function cameraLookButton() {
   const keep = clone(im.params); clearCameraLook(im.params, im);
   const vals = await fitCameraLook(im, null); status('');
   if (!vals) { im.params = keep; toast('無法比對相機 JPEG', 3000, { kind: 'err' }); return; }
-  takeLut(im, vals); renderer.setCamLUT(im.camLut || null, CAM_LUT_N); mergeLook(im.params, vals); im.look = vals; saveLook(im); im.lookInfo = fitCameraLook.last; im.presetId = null; refreshAll(); commit(); showInfo();
+  takeLut(im, vals); mergeLook(im.params, vals); renderer.setCamLUT(activeLut(im), CAM_LUT_N); im.look = vals; saveLook(im); im.lookInfo = fitCameraLook.last; im.presetId = null; refreshAll(); commit(); showInfo();
   toast('已套用相機 JPEG 的色調');
+}
+// ---------- reference photo: match a JPG of the same picture (also cropped, straightened or edited), or take another one's style ----------
+const pickFile = accept => new Promise(res => { const inp = el('input', { type: 'file', accept }); inp.onchange = () => res(inp.files[0] || null); inp.click(); });
+// A colour LUT fitted to a reference cannot be rebuilt without that file, so each one is kept in localStorage under its own id
+// (params.lutRef; '' = the LUT fitted to the camera's embedded JPEG): undo, pasted settings and a later session find it again.
+// Int8 offsets from the identity (the fit caps them at REF_CAP), deflate, base64 - some tens of KB; beyond REF_KEEP the oldest go.
+const REF_LUT = 'rawedit:reflut:', REF_KEEP = 16, REF_CAP = 0.3, REF_SAME = 0.55, refLuts = new Map(); // id -> Float32Array | null | Promise
+function lutFor(p, im) { if (!p.lutRef) return (im && im.camLut) || null; const L = refLuts.get(p.lutRef); return L instanceof Float32Array ? L : null; }
+const activeLut = im => lutFor(im.params, im);
+function refLutReady(id) { // -> Promise of the LUT, null when it is no longer stored
+  if (!id) return Promise.resolve(null);
+  if (!refLuts.has(id)) refLuts.set(id, loadRefLut(id).then(L => { refLuts.set(id, L); return L; }));
+  return Promise.resolve(refLuts.get(id));
+}
+function syncLut(im) { // the renderer's colour LUT follows the photo's params (undo, redo, reset and paste can switch it)
+  const id = im.params.lutRef;
+  if (id && !refLuts.has(id)) refLutReady(id).then(() => { const c = CUR(); if (c && c.params.lutRef === id) { renderer.setCamLUT(activeLut(c), CAM_LUT_N); requestRender(false); } });
+  renderer.setCamLUT(activeLut(im), CAM_LUT_N);
+}
+const lutIdentity = (N, k, c) => (c === 0 ? k % N : c === 1 ? ((k / N) | 0) % N : (k / (N * N)) | 0) / (N - 1);
+async function saveRefLut(id, L) {
+  refLuts.set(id, L);
+  const N = CAM_LUT_N, q = new Int8Array(L.length);
+  for (let k = 0, i = 0; k < N * N * N; k++) for (let c = 0; c < 3; c++, i++) q[i] = Math.max(-127, Math.min(127, Math.round((L[i] - lutIdentity(N, k, c)) / REF_CAP * 127)));
+  let s = '';
+  try { const z = new Uint8Array(await new Response(new Blob([q]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer()); for (let i = 0; i < z.length; i += 0x8000) s += String.fromCharCode(...z.subarray(i, i + 0x8000)); s = btoa(s); }
+  catch (e) { console.warn('reference LUT not stored', e); return false; }
+  let ids = []; try { ids = JSON.parse(localStorage.getItem(REF_LUT + 'ids') || '[]'); } catch { }
+  ids = ids.filter(x => x !== id); ids.push(id);
+  for (;;) {
+    while (ids.length > REF_KEEP) localStorage.removeItem(REF_LUT + ids.shift());
+    try { localStorage.setItem(REF_LUT + id, s); localStorage.setItem(REF_LUT + 'ids', JSON.stringify(ids)); return true; }
+    catch (e) { if (ids.length <= 1) break; localStorage.removeItem(REF_LUT + ids.shift()); } // full: drop the oldest and try again
+  }
+  toast('瀏覽器的儲存空間不足：重新整理後，這張照片的「色彩對齊」要再選一次參考照片', 5000); return false;
+}
+async function loadRefLut(id) {
+  try {
+    const s = localStorage.getItem(REF_LUT + id); if (!s) return null;
+    const q = new Int8Array(await new Response(new Blob([Uint8Array.from(atob(s), c => c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    const N = CAM_LUT_N, L = new Float32Array(q.length); if (q.length !== N * N * N * 3) return null;
+    for (let k = 0, i = 0; k < N * N * N; k++) for (let c = 0; c < 3; c++, i++) L[i] = lutIdentity(N, k, c) + q[i] / 127 * REF_CAP;
+    return L;
+  } catch (e) { return null; }
+}
+function blurBox(a, w, h, passes = 1) { // 3x3 box blur, repeated
+  let s = a;
+  for (let p = 0; p < passes; p++) {
+    const t = new Float32Array(w * h), o = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; t[i] = (s[x > 0 ? i - 1 : i] + s[i] + s[x < w - 1 ? i + 1 : i]) / 3; }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x; o[i] = (t[y > 0 ? i - w : i] + t[i] + t[y < h - 1 ? i + w : i]) / 3; }
+    s = o;
+  }
+  return s;
+}
+// the reference turned clockwise by o.rot (a multiple of 90 degrees) and mirrored when o.flip, drawn at w x h
+function refOriented(bm, o, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high';
+  g.translate(w / 2, h / 2); g.rotate(o.rot * Math.PI / 180); if (o.flip) g.scale(-1, 1);
+  const sw = o.rot % 180 ? h : w, sh = o.rot % 180 ? w : h; g.drawImage(bm, -sw / 2, -sh / 2, sw, sh); return c;
+}
+const REF_ORIENTS = [0, 90, 180, 270].flatMap(rot => [{ rot, flip: false }, { rot, flip: true }]);
+// Where a reference sits in this photo's frame (the default framing). Edge maps are compared, not brightness: the reference may be
+// graded quite differently. Coarse: every orientation (90-degree turns, mirrored) and scale, by normalised correlation over
+// positions (multi-scale template matching; window statistics from integral images). Fine, for the best three: position, scale and
+// a straightening angle up to about 6 degrees, climbed on blurred and then on sharp edge maps (the role of OpenCV's ECC refinement
+// in darktable's LUT generator; SIFT + homography in imalign). -> { o, P: {cx, cy, sc, th}, Tw, Th, W2, H2, score } or null
+function locateReference(im, bm) {
+  const base = clone(defaultsFor(im)), G = geometry(base.geo, im.fullW, im.fullH);
+  renderer.setCurveLUT(curveLUTFor(base)); const U = uniformsFromParams(base, im, {}); U.showMask = -1; U.clipWarn = 0;
+  let r0, r2; try { r0 = renderer.readSmall(U, G, 128, 'loc'); r2 = renderer.readSmall(U, G, 320, 'loc'); } finally { renderer.setCurveLUT(curveLUTFor(im.params)); }
+  const W = r0.w, H = r0.h, A = blurBox(lumGrad(r0.px, W, H), W, H, 1), I1 = new Float64Array((W + 1) * (H + 1)), I2 = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const v = A[y * W + x], k = (y + 1) * (W + 1) + x + 1; I1[k] = v + I1[k - 1] + I1[k - W - 1] - I1[k - W - 2]; I2[k] = v * v + I2[k - 1] + I2[k - W - 1] - I2[k - W - 2]; }
+  const box = (I, x, y, w, h) => I[(y + h) * (W + 1) + x + w] - I[y * (W + 1) + x + w] - I[(y + h) * (W + 1) + x] + I[y * (W + 1) + x];
+  const edges = (o, w, h, blur) => { const t = lumGrad(refOriented(bm, o, w, h).getContext('2d').getImageData(0, 0, w, h).data, w, h); return blur ? blurBox(t, w, h, blur) : t; };
+  const cands = [];
+  for (const o of REF_ORIENTS) {
+    const ar = o.rot % 180 ? bm.width / bm.height : bm.height / bm.width; let best = null; // ar: the oriented reference's height / width
+    for (let s = Math.min(1, H / (W * ar)); ; s *= 0.92) {
+      const w = Math.round(W * s), h = Math.round(w * ar); if (w < 20 || h < 14 || w * h < 0.06 * W * H) break; if (w > W || h > H) continue;
+      const t = edges(o, w, h, 1); let m = 0; for (const v of t) m += v; m /= t.length; let ts = 0; for (let i = 0; i < t.length; i++) { t[i] -= m; ts += t[i] * t[i]; }
+      const step = Math.max(1, Math.round(Math.min(w, h) / 12)), n = w * h;
+      for (let y0 = 0; y0 <= H - h; y0 += step) for (let x0 = 0; x0 <= W - w; x0 += step) {
+        let c = 0; for (let y = 0; y < h; y++) { const ro = (y0 + y) * W + x0, to = y * w; for (let x = 0; x < w; x++) c += A[ro + x] * t[to + x]; }
+        const mm = box(I1, x0, y0, w, h) / n, v = box(I2, x0, y0, w, h) - n * mm * mm, sc = c / Math.sqrt(Math.max(v, 1e-9) * Math.max(ts, 1e-9));
+        if (!best || sc > best.score) best = { score: sc, x: x0, y: y0, w, h, o, ar };
+      }
+    }
+    if (best) cands.push(best);
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.score - a.score);
+  const W2 = r2.w, H2 = r2.h, A2 = lumGrad(r2.px, W2, H2), A2b = blurBox(A2, W2, H2, 2), k2 = W2 / W;
+  let out = null;
+  for (const c of cands.slice(0, 3)) {
+    const Tw = Math.max(24, Math.min(240, Math.round(c.w * k2))), Th = Math.max(16, Math.round(Tw * c.ar)), T = edges(c.o, Tw, Th, 0), Tb = blurBox(T, Tw, Th, 2);
+    const ncc = (E, T, P, st) => {
+      const ca = Math.cos(P.th), sa = Math.sin(P.th); let n = 0, tot = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+      for (let v = 0; v < Th; v += st) for (let u = 0; u < Tw; u += st) {
+        tot++; const du = (u + 0.5 - Tw / 2) * P.sc, dv = (v + 0.5 - Th / 2) * P.sc, x = P.cx + ca * du - sa * dv - 0.5, y = P.cy + sa * du + ca * dv - 0.5;
+        if (!(x >= 0 && y >= 0 && x < W2 - 1 && y < H2 - 1)) continue;
+        const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, i = y0 * W2 + x0;
+        const a = (E[i] * (1 - fx) + E[i + 1] * fx) * (1 - fy) + (E[i + W2] * (1 - fx) + E[i + W2 + 1] * fx) * fy, t = T[v * Tw + u];
+        n++; sx += a; sy += t; sxx += a * a; syy += t * t; sxy += a * t;
+      }
+      if (n < 0.85 * tot) return -1; // the reference has to lie (almost) inside our frame
+      return (sxy - sx * sy / n) / Math.sqrt(Math.max((sxx - sx * sx / n) * (syy - sy * sy / n), 1e-12));
+    };
+    const climb = (E, T, P, st, stride, minPos) => {
+      let best = ncc(E, T, P, stride); st = Object.assign({}, st);
+      for (let it = 0; it < 80; it++) {
+        let moved = false;
+        for (const k of ['cx', 'cy', 'sc', 'th']) for (const d of [1, -1]) { const Q = Object.assign({}, P); Q[k] += d * st[k] * (k === 'sc' ? P.sc : 1); const s = ncc(E, T, Q, stride); if (s > best) { best = s; P = Q; moved = true; } }
+        if (!moved) { for (const k in st) st[k] /= 2; if (st.cx < minPos) break; }
+      }
+      return P;
+    };
+    let P = { cx: (c.x + c.w / 2) * k2, cy: (c.y + c.h / 2) * k2, sc: c.w * k2 / Tw, th: 0 }, bt = -2;
+    for (let d = -6; d <= 6; d += 1.5) { const Q = Object.assign({}, P, { th: d * Math.PI / 180 }), s = ncc(A2b, Tb, Q, 2); if (s > bt) { bt = s; P = Q; } }
+    P = climb(A2b, Tb, P, { cx: 2, cy: 2, sc: 0.02, th: 0.6 * Math.PI / 180 }, 2, 0.4);
+    P = climb(A2, T, P, { cx: 0.75, cy: 0.75, sc: 0.006, th: 0.2 * Math.PI / 180 }, 1, 0.1);
+    const score = ncc(A2, T, P, 1);
+    if (!out || score > out.score) out = { o: c.o, P, Tw, Th, W2, H2, score, coarse: c.score };
+  }
+  return out;
+}
+// The reference resampled into our frame's axes, over the largest upright rectangle it covers (with the same aspect ratio), and that
+// rectangle as a crop of our default framing -> { crop, canvas }. (darktable's LUT generator likewise warps the JPEG onto the RAW.)
+function referenceTarget(bm, loc) {
+  const { P, Tw, Th, W2, H2 } = loc, wr = Tw * P.sc, hr = Th * P.sc, a = Math.abs(P.th), f = 1 / (Math.cos(a) + Math.max(wr / hr, hr / wr) * Math.sin(a));
+  const x0 = Math.max(0, P.cx - f * wr / 2), y0 = Math.max(0, P.cy - f * hr / 2), x1 = Math.min(W2, P.cx + f * wr / 2), y1 = Math.min(H2, P.cy + f * hr / 2);
+  const ow = loc.o.rot % 180 ? bm.height : bm.width, oh = loc.o.rot % 180 ? bm.width : bm.height, src = refOriented(bm, loc.o, ow, oh);
+  const cw = 768, ch = Math.max(16, Math.round(cw * (y1 - y0) / (x1 - x0))), c = document.createElement('canvas'); c.width = cw; c.height = ch;
+  const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high';
+  g.scale(cw / (x1 - x0), ch / (y1 - y0)); g.translate(P.cx - x0, P.cy - y0); g.rotate(P.th); g.scale(P.sc * Tw / ow, P.sc * Tw / ow); g.translate(-ow / 2, -oh / 2); g.drawImage(src, 0, 0);
+  return { crop: { x: x0 / W2, y: y0 / H2, w: (x1 - x0) / W2, h: (y1 - y0) / H2 }, canvas: c };
+}
+// the reference's framing as this photo's crop and straightening (our straightening zooms in to keep the corners filled, so a crop
+// reaching past that is pulled inside)
+function geoFromRef(im, loc) {
+  const g = clone(defaultsFor(im).geo), G = geometry(g, im.fullW, im.fullH), Wr = G.Wr, Hr = G.Hr, k = Wr / loc.W2, th = loc.P.th, a = Math.abs(th);
+  const t = 1 / (Math.cos(a) + (Math.max(Wr, Hr) / Math.min(Wr, Hr)) * Math.sin(a)), C = [Wr / 2, Hr / 2], dx = loc.P.cx * k - C[0], dy = loc.P.cy * k - C[1];
+  const ca = Math.cos(-th), sa = Math.sin(-th), pc = [C[0] + (ca * dx - sa * dy) / t, C[1] + (sa * dx + ca * dy) / t];
+  const cw = Math.min(1, loc.Tw * loc.P.sc * k / (t * Wr)), ch = Math.min(1, loc.Th * loc.P.sc * k / (t * Hr));
+  g.angle = Math.round(th * 180 / Math.PI * 100) / 100; g.crop = { x: clamp(pc[0] / Wr - cw / 2, 0, 1 - cw), y: clamp(pc[1] / Hr - ch / 2, 0, 1 - ch), w: cw, h: ch }; g.aspect = 'free';
+  return g;
+}
+// The reference's tone curve, from cells that pair up (after the sliders; the colour LUT takes what is left). Axis: the curve's,
+// perceptual luminance Y^(1/2.2) (enc() in the shader). Per bin of our level the weighted median of the reference's, made monotone
+// (pool adjacent violators), at most 8 points. null when it stays within 1.5 % of the identity.
+function curveFromPairs(A, B) {
+  const lin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const lev = (rgb, i) => Math.pow(Math.max(0, 0.2126 * lin(rgb[i * 3]) + 0.7152 * lin(rgb[i * 3 + 1]) + 0.0722 * lin(rgb[i * 3 + 2])), 1 / 2.2);
+  const NB = 20, bins = Array.from({ length: NB }, () => []);
+  for (let i = 0; i < A.sd.length; i++) {
+    if (A.clip[i] > 0.2) continue;
+    const w = Math.exp(-(A.sd[i] * A.sd[i] + B.sd[i] * B.sd[i]) / (2 * 0.05 * 0.05)); if (w < 0.05) continue;
+    const x = lev(A.rgb, i); bins[Math.min(NB - 1, (x * NB) | 0)].push([lev(B.rgb, i), w, x]);
+  }
+  const st = [];
+  for (const a of bins) {
+    let W = 0, X = 0; for (const [, w, x] of a) { W += w; X += w * x; } if (W < 2) continue;
+    a.sort((p, q) => p[0] - q[0]); let c = 0, med = a[a.length - 1][0]; for (const [y, w] of a) { c += w; if (c >= W / 2) { med = y; break; } }
+    st.push({ x: X, y: med * W, w: W });
+    while (st.length > 1 && st[st.length - 2].y / st[st.length - 2].w > st[st.length - 1].y / st[st.length - 1].w) { const b = st.pop(), p = st[st.length - 1]; p.x += b.x; p.y += b.y; p.w += b.w; }
+  }
+  let pts = st.map(s => [s.x / s.w, s.y / s.w]).filter(([x]) => x > 0.03 && x < 0.97);
+  if (pts.length < 3 || pts[pts.length - 1][0] - pts[0][0] < 0.3) return null;
+  if (pts.length > 8) { const x0 = pts[0][0], x1 = pts[pts.length - 1][0], sel = []; for (let k = 0; k < 8; k++) { const t = x0 + (x1 - x0) * k / 7; let b = pts[0]; for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(b[0] - t)) b = p; if (!sel.includes(b)) sel.push(b); } pts = sel; }
+  const n = pts.length, sl = (i, j) => clamp((pts[j][1] - pts[i][1]) / Math.max(pts[j][0] - pts[i][0], 1e-3), 0.2, 4);
+  const y0 = clamp(pts[0][1] - pts[0][0] * sl(0, 1), 0, 0.35), y1 = clamp(pts[n - 1][1] + (1 - pts[n - 1][0]) * sl(n - 2, n - 1), 0.6, 1);
+  const out = [[0, y0], ...pts, [1, y1]];
+  if (Math.max(...out.map(([x, y]) => Math.abs(y - x))) < 0.015) return null;
+  return out.map(([x, y]) => [+x.toFixed(3), +clamp(y, 0, 1).toFixed(3)]);
+}
+function lutAt(L, N, r, g, b) { // trilinear lookup in a fitted LUT (layout as fitCamLUT's output)
+  const M = N - 1, p = [r, g, b].map(v => Math.min(M - 1e-6, Math.max(0, v * M))), q = p.map(v => v | 0), f = p.map((v, j) => v - q[j]), o = [0, 0, 0];
+  for (let c = 0; c < 8; c++) { const dr = c & 1, dg = (c >> 1) & 1, db = c >> 2, w = (dr ? f[0] : 1 - f[0]) * (dg ? f[1] : 1 - f[1]) * (db ? f[2] : 1 - f[2]), k = ((q[2] + db) * N + q[1] + dg) * N + q[0] + dr; o[0] += w * L[k * 3]; o[1] += w * L[k * 3 + 1]; o[2] += w * L[k * 3 + 2]; }
+  return o;
+}
+// The reference's colour LUT, with its smoothing chosen by cross-validation (as chromapair chooses its model): four folds of
+// 8x8-cell blocks are held out in turn and the smoothing that predicts them best is kept. When no smoothing beats "no LUT" on the
+// held-out cells by 3 %, there is no LUT: it would only learn the noise of this pair.
+function fitCamLUTCV(A, B, gw, N, total, cap, info) {
+  const n = A.sd.length, w = camLutWeights(A, B), fold = new Uint8Array(n);
+  for (let i = 0; i < n; i++) fold[i] = (((i % gw) >> 3) & 1) + 2 * ((((i / gw) | 0) >> 3) & 1);
+  const res = []; let best = null;
+  for (const lam of [0.5, 2, 6]) {
+    let E = 0, E0 = 0;
+    for (let f = 0; f < 4; f++) {
+      const skip = fold.map(v => v === f ? 1 : 0), L = fitCamLUT(A, B, N, lam, total, { cap, skip });
+      for (let i = 0; i < n; i++) {
+        if (fold[i] !== f || !(w[i] > 1e-3)) continue; const j = i * 3, o = lutAt(L, N, A.rgb[j], A.rgb[j + 1], A.rgb[j + 2]);
+        E += w[i] * Math.hypot(B.rgb[j] - o[0], B.rgb[j + 1] - o[1], B.rgb[j + 2] - o[2]); E0 += w[i] * Math.hypot(B.rgb[j] - A.rgb[j], B.rgb[j + 1] - A.rgb[j + 1], B.rgb[j + 2] - A.rgb[j + 2]);
+      }
+    }
+    res.push([lam, +(E / Math.max(E0, 1e-9)).toFixed(3)]); if (!best || E < best.E) best = { lam, E, E0 };
+  }
+  if (info) info.lutCV = res;
+  if (!best || !(best.E < 0.97 * best.E0)) return null;
+  return fitCamLUT(A, B, N, best.lam, total, { cap });
+}
+// statistics for matching a style: a 256-level histogram on the curve's axis (perceptual luminance), the tint of near-neutral pixels in
+// shadows / mid-tones / highlights (a grade shows in the neutrals; coloured objects differ with the content), the median chroma, the
+// share of coloured pixels, and per HSL band the mean hue, chroma and lightness of its colours
+function styleStats(px) {
+  const n = px.length >> 2, step = Math.max(1, Math.floor(n / 60000)), Cs = [], hist = new Float64Array(256);
+  const zones = [0, 1, 2].map(() => ({ a: 0, b: 0, n: 0 })), bands = Array.from({ length: 8 }, () => ({ w: 0, x: 0, y: 0, C: 0, L: 0 }));
+  let cnt = 0, colour = 0;
+  for (let j = 0; j < n; j += step) {
+    const i = j * 4, r = srgbToLin(px[i]), g = srgbToLin(px[i + 1]), b = srgbToLin(px[i + 2]), [L, A, B] = linToOklab(r, g, b), C = Math.hypot(A, B); cnt++;
+    hist[Math.min(255, (Math.pow(Math.max(0, 0.2126 * r + 0.7152 * g + 0.0722 * b), 1 / 2.2) * 256) | 0)]++;
+    if (C < 0.04) { const z = zones[L < 0.4 ? 0 : L < 0.7 ? 1 : 2]; z.a += A; z.b += B; z.n++; }
+    if (C > 0.015) Cs.push(C);
+    if (C > 0.03) { colour++; const h = (Math.atan2(B, A) * 180 / Math.PI + 360) % 360; for (let k = 0; k < 8; k++) { const w = hslBandW(h, k); if (w < 0.05) continue; const Q = bands[k]; Q.w += w; Q.x += w * A / C; Q.y += w * B / C; Q.C += w * C; Q.L += w * L; } }
+  }
+  Cs.sort((p, q) => p - q);
+  for (const z of zones) if (z.n) { z.a /= z.n; z.b /= z.n; }
+  for (const Q of bands) if (Q.w) { Q.h = (Math.atan2(Q.y, Q.x) * 180 / Math.PI + 360) % 360; Q.C /= Q.w; Q.L /= Q.w; Q.f = Q.w / cnt; }
+  return { hist, zones, cMed: Cs.length ? Cs[Cs.length >> 1] : 0, colour: colour / Math.max(cnt, 1), bands };
+}
+// RawTherapee's auto-matched tone curve (histmatching.cc), adapted to two different photos: each of our levels goes to the reference
+// level with the same cumulative share; 8 points across the range our image covers (1 %..99 %), slopes kept within 0.3..3, and points in
+// the upper half that would make the curve sag dropped (RawTherapee expects an S: no dips below the chord near the top). Content differs
+// between two photos (a dark street is not a bright beach), so the curve moves 80 % of the way and the mid-tones at most 0.12.
+function cdfCurve(oH, rH) {
+  const cdf = h => { const c = new Float64Array(256); let s = 0; for (let i = 0; i < 256; i++) { s += h[i]; c[i] = s; } if (s > 0) for (let i = 0; i < 256; i++) c[i] /= s; return c; };
+  const co = cdf(oH), cr = cdf(rH), share = i => i ? (co[i - 1] + co[i]) / 2 : co[0] / 2;
+  const inv = t => { let j = 0; while (j < 255 && cr[j] < t) j++; const lo = j ? cr[j - 1] : 0; return (j + clamp(cr[j] > lo ? (t - lo) / (cr[j] - lo) : 0.5, 0, 1)) / 256; };
+  const at = t => { let i = 0; while (i < 255 && co[i] < t) i++; return i; };
+  const i0 = at(0.01), i1 = Math.min(255, Math.max(i0 + 12, at(0.99))), im = at(0.5), amt = 0.8;
+  const dm = (inv(share(im)) - (im + 0.5) / 256) * amt, excess = dm - clamp(dm, -0.12, 0.12);
+  let pts = [];
+  for (let k = 0; k < 8; k++) { const i = Math.round(i0 + (i1 - i0) * k / 7), x = (i + 0.5) / 256; if (pts.length && x - pts[pts.length - 1][0] < 0.02) continue; pts.push([x, x + (inv(share(i)) - x) * amt - excess * 4 * x * (1 - x)]); }
+  if (pts.length < 2) return null;
+  for (let i = 1; i < pts.length; i++) { const dx = pts[i][0] - pts[i - 1][0]; pts[i][1] = pts[i - 1][1] + dx * clamp((pts[i][1] - pts[i - 1][1]) / dx, 0.3, 3); }
+  const n = pts.length, s0 = (pts[1][1] - pts[0][1]) / (pts[1][0] - pts[0][0]), s1 = (pts[n - 1][1] - pts[n - 2][1]) / (pts[n - 1][0] - pts[n - 2][0]);
+  pts = [[0, clamp(pts[0][1] - pts[0][0] * s0, 0, 0.3)], ...pts, [1, clamp(pts[n - 1][1] + (1 - pts[n - 1][0]) * s1, 0.7, 1)]];
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let i = 1; i < pts.length - 1; i++) { if (pts[i][0] < 0.5) continue; const [xa, ya] = pts[i - 1], [xb, yb] = pts[i + 1]; if (pts[i][1] < ya + (pts[i][0] - xa) / (xb - xa) * (yb - ya) - 1e-4) { pts.splice(i, 1); changed = true; break; } }
+  }
+  return pts.map(([x, y]) => [+x.toFixed(3), +clamp(y, 0, 1).toFixed(3)]);
+}
+let OK_HUE_INV = null;
+function hueFromOk(rad) { // RGB hue in degrees whose OkLab direction is rad (inverse of okHueRad)
+  if (!OK_HUE_INV) OK_HUE_INV = Array.from({ length: 360 }, (_, d) => okHueRad(d));
+  let best = 0, bd = 9; for (let d = 0; d < 360; d++) { const e = Math.abs(Math.atan2(Math.sin(rad - OK_HUE_INV[d]), Math.cos(rad - OK_HUE_INV[d]))); if (e < bd) { bd = e; best = d; } }
+  return best;
+}
+// A different photo: its style, as sliders, in the order color-matcher's HM-MKL-HM uses - tone (cdfCurve), then colour in three
+// measured rounds (colour grading from the neutral tint per zone, saturation from the median chroma, the HSL bands present in both
+// photos), each damped and limited so content differences cannot run away, then the tone again with the colour in place.
+// A black-and-white reference turns on 黑白 (its tint still goes to the grading).
+function matchStyle(im, bm) {
+  const c = document.createElement('canvas'), k = Math.min(1, 256 / Math.max(bm.width, bm.height)); c.width = Math.max(8, Math.round(bm.width * k)); c.height = Math.max(8, Math.round(bm.height * k));
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bm, 0, 0, c.width, c.height); const ref = styleStats(g.getImageData(0, 0, c.width, c.height).data);
+  const P = clone(im.params); for (const key of ['curves', 'pcurve', 'grade', 'film', 'bw', 'bwmix']) P[key] = clone(DEFAULTS[key]); P.hsl = zeroHSL(); P.saturation = 0; P.vibrance = 0;
+  const mono = ref.colour < 0.01 && ref.cMed < 0.02; if (mono) P.bw = true;
+  const G = geometry(P.geo, im.fullW, im.fullH);
+  const measure = p => { renderer.setCurveLUT(curveLUTFor(p)); const U = uniformsFromParams(p, im, {}); U.showMask = -1; U.clipWarn = 0; return styleStats(renderer.readSmall(U, G, 256, 'style').px); };
+  const tone = () => { const q = clone(P); q.curves = clone(DEFAULTS.curves); const pts = cdfCurve(measure(q).hist, ref.hist); if (pts) P.curves.rgb = pts; };
+  try {
+    tone();
+    for (let it = 0; it < 3; it++) {
+      const m = measure(P);
+      for (const [key, z] of [['s', 0], ['m', 1], ['h', 2]]) {
+        const R = ref.zones[z], O = m.zones[z]; if (R.n < 40 || O.n < 40) continue;
+        const gz = P.grade[key], ang = okHueRad(gz.h || 0), mag = (gz.s || 0) / 100 * 0.12;
+        const va = Math.cos(ang) * mag + (R.a - O.a) * 0.8, vb = Math.sin(ang) * mag + (R.b - O.b) * 0.8;
+        P.grade[key] = { h: hueFromOk(Math.atan2(vb, va)), s: Math.round(clamp(Math.hypot(va, vb) / 0.12 * 100, 0, 60)), l: 0 };
+      }
+      if (mono) continue;
+      if (ref.cMed > 0 && m.cMed > 0) P.saturation = Math.round(clamp(((1 + P.saturation / 100) * Math.pow(ref.cMed / m.cMed, 0.8) - 1) * 100, -60, 60));
+      for (let b = 0; b < 8; b++) {
+        const R = ref.bands[b], O = m.bands[b]; if (!(R.f > 0.02 && O.f > 0.02)) continue;
+        P.hsl.h[b] = Math.round(clamp(P.hsl.h[b] + ((((R.h - O.h + 540) % 360) - 180) / 45 * 100 * 0.6), -40, 40));
+        P.hsl.s[b] = Math.round(clamp(((1 + P.hsl.s[b] / 100) * Math.pow(R.C / O.C, 0.7) - 1) * 100, -50, 50));
+        P.hsl.l[b] = Math.round(clamp(P.hsl.l[b] + (R.L - O.L) / 0.18 * 100 * 0.3, -25, 25));
+      }
+    }
+    tone();
+  } finally { renderer.setCurveLUT(curveLUTFor(im.params)); }
+  return P;
+}
+// 「參考照片」: the same picture - found anywhere in the frame, also cropped, straightened, turned or mirrored - is matched cell by cell:
+// tone sliders, then its tone curve, then the colour LUT (「色彩對齊」), as for the camera's own JPEG. Any other picture gives its style
+// as sliders. An undoable edit either way. -> { same, loc, info } or null
+async function applyReference(im, file) {
+  let bm, small;
+  try { bm = await createImageBitmap(file); } catch (e) { toast('讀不了這個檔案（這個瀏覽器不支援 HEIC 的話，請先轉成 JPG）', 5000, { kind: 'err' }); return null; }
+  try {
+    const k = Math.min(1, 1024 / Math.max(bm.width, bm.height));
+    small = k < 1 ? await createImageBitmap(bm, { resizeWidth: Math.round(bm.width * k), resizeHeight: Math.round(bm.height * k), resizeQuality: 'high' }) : bm;
+    if (CUR() !== im) return null;
+    const loc = locateReference(im, small);
+    applyReference.last = loc && { score: +loc.score.toFixed(3), coarse: +loc.coarse.toFixed(3), o: loc.o, angle: +(loc.P.th * 180 / Math.PI).toFixed(2) };
+    if (loc && loc.score > REF_SAME) {
+      const tg = referenceTarget(small, loc);
+      const vals = await fitCameraLook(im, null, () => CUR() !== im, { target: tg.canvas, crop: tg.crop }); if (CUR() !== im) return null;
+      if (vals) {
+        const keep = ['geo', 'masks', 'spots', 'sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], np = mergeLook(clone(defaultsFor(im)), vals);
+        for (const key of keep) np[key] = clone(im.params[key]);
+        np.lens = Object.assign({}, im.params.lens, { manVig: (vals.lens && vals.lens.manVig) || 0 });
+        np.lutRef = ''; np.camColor = 0;
+        if (vals._lut) { const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); await saveRefLut(id, vals._lut); np.lutRef = id; np.camColor = 100; }
+        if (CUR() !== im) return null;
+        im.params = np; im.presetId = null; refreshAll(); commit();
+        return { same: true, loc, tg, info: fitCameraLook.last };
+      }
+    }
+    im.params = matchStyle(im, small); im.presetId = null; refreshAll(); commit();
+    return { same: false, loc };
+  } finally { if (small && small !== bm) small.close(); bm.close(); }
+}
+async function referenceJpegButton() {
+  const im = CUR(); if (!im || !state.previewData || state.previewData.imId !== im.id) return;
+  const file = await pickFile('image/*'); if (!file || CUR() !== im) return;
+  status('比對參考照片…'); let r; try { r = await applyReference(im, file); } finally { status(''); }
+  if (!r || CUR() !== im) return;
+  if (r.same) {
+    const c = r.tg.crop, moved = c.w * c.h < 0.9 || Math.abs(r.loc.P.th) > 0.004 || r.loc.o.rot || r.loc.o.flip;
+    const info = r.info || {}, lut = im.params.lutRef ? '；「色彩對齊」控制顏色貼合的程度' : '';
+    toast(`同一張照片${moved ? '（已找出它在畫面中的位置與角度）' : ''}：已對齊它的色調${info.curve ? '、曲線' : ''}${lut}`, 7000, { kind: 'ok', action: moved && !r.loc.o.flip && !r.loc.o.rot
+      ? { label: '套用同樣裁切', fn: () => { if (CUR() !== im) return; im.params.geo = geoFromRef(im, r.loc); refreshAll(); fitView(); commit(); } }
+      : { label: '復原', fn: undo } });
+  } else toast('不同的照片：已把它的色調風格換成滑桿（曲線、色調分級、飽和度、HSL），可以再自行調整', 7000, { kind: 'ok', action: { label: '復原', fn: undo } });
 }
 function camLookToast(im) {
   if (camLookToast.shown) return; camLookToast.shown = true;
@@ -3771,7 +4116,8 @@ function buildPanels() {
       for (const [k, n] of PROFILE_LIST) pr.append(el('button', { 'data-p': k, onclick: () => { const im = CUR(); if (!im) return; im.params.profile = k; refreshAll(); commit(); } }, n));
       const auto = el('button', { class: 'primary', onclick: () => autoTone() }, '自動');
       const cam = el('button', { title: '讓顏色和亮度接近相機拍出來的 JPEG', onclick: () => cameraLookButton() }, '相機色調');
-      sec.insertBefore(el('div', {}, hdr('描述檔', cam, auto), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%'), makeSlider('camColor', '相機色彩', 0, 100, 1, v => Math.round(v) + '%')), sec.children[0]);
+      const ref = el('button', { title: '選一張照片：同一張照片（裁切、轉正、修過都可以）就逐格對齊它的顏色；不同的照片就套用它的色調風格', onclick: () => referenceJpegButton() }, '參考照片');
+      sec.insertBefore(el('div', {}, hdr('描述檔', ref, cam, auto), pr, makeSlider('profileAmt', '描述檔強度', 0, 200, 1, v => Math.round(v) + '%'), makeSlider('camColor', '色彩對齊', 0, 100, 1, v => Math.round(v) + '%')), sec.children[0]);
     }
     if (t.id === 'color') {
       const wbBar = el('div', { class: 'toolbar wbbar' }, el('span', { class: 'hint' }, '白平衡'),
@@ -3872,7 +4218,7 @@ function selectTab(id) {
 }
 function resetGroup(keys) { const im = CUR(); if (!im) return; const st = startingParams(im); for (const k of keys) setPath(im.params, k, clone(getPath(st, k))); refreshAll(); commit(); }
 function refreshBW() { const im = CUR(); const on = im && im.params.bw; const b = $('#bwToggle'); if (b) { b.classList.toggle('on', !!on); b.textContent = on ? '黑白：開（點擊關閉）' : '轉為黑白'; } $('#bwmix').style.display = on ? '' : 'none'; }
-function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshGlowUI(); refreshPointColorUI(); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
+function refreshAll() { refreshNavDots(); refreshHealUI(); if (CUR()) refreshSpotSource(CUR()); refreshProfileUI(); refreshGlowUI(); refreshPointColorUI(); if (CUR()) syncLut(CUR()); refreshLocalUI(); refreshLensUI(); for (const s of sliders.values()) s.update(); refreshBW(); if (CUR()) { curveEd.setCurves(CUR().params.curves); renderer.setCurveLUT(curveLUTFor(CUR().params)); } renderHistoryUI(); refreshCropUI(); refreshPresetUI(); requestRender(false); }
 
 // ---------- local adjustments panel ----------
 const MASK_NAMES = { linear: '線性漸層', radial: '放射狀', brush: '筆刷', sky: '天空', subject: '主體', background: '背景' };
@@ -4182,7 +4528,7 @@ function renderHistoryUI() {
 // [id, name, param keys, checked by default]
 const COPY_GROUPS = [
   ['wb', '白平衡', ['temp', 'tint'], true], ['light', '光線', ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'dlighting'], true],
-  ['presence', '鮮豔度／飽和度', ['vibrance', 'saturation'], true], ['profile', '描述檔／膠片', ['profile', 'profileAmt', 'film'], true],
+  ['presence', '鮮豔度／飽和度', ['vibrance', 'saturation'], true], ['profile', '描述檔／膠片', ['profile', 'profileAmt', 'film', 'camColor', 'lutRef'], true],
   ['hsl', 'HSL', ['hsl'], true], ['bw', '黑白', ['bw', 'bwmix'], true], ['curve', '曲線', ['curves', 'pcurve'], true], ['grade', '色調分級', ['grade'], true],
   ['fx', '效果', ['clarity', 'dehaze', 'texture', 'fade', 'vignette', 'vigMid', 'vigFeather', 'vigRound', 'vigHi', 'grain', 'grainSize', 'grainRough', 'glow'], true],
   ['detail', '細節', ['sharpen', 'sharpenRadius', 'sharpenMask', 'nrLum', 'nrColor'], true], ['calib', '相機校正', ['calib'], true], ['lens', '鏡頭校正', ['lens'], true],
@@ -5527,10 +5873,11 @@ async function selectImage(i) {
       status('比對相機 JPEG 的色調…'); const vals = await fitCameraLook(im, null, () => seq !== loadSeq); if (seq !== loadSeq) return;
       if (vals) { takeLut(im, vals); applyCameraLook(im, vals); saveLook(im); im.lookInfo = fitCameraLook.last; refreshAll(); updateUndoButtons(); camLookToast(im); }
     }
-    if (im.look && (im.look.camColor || 0) > 0 && !im.camLut && camLookOn && !im.file._isImage && im.thumbBlobUrl) {
+    if (im.look && (im.look.camColor || 0) > 0 && !im.camLut && camLookOn && !im.file._isImage && im.thumbBlobUrl && !im.params.lutRef) {
       const v = await fitCameraLook(im, null, () => seq !== loadSeq, { lookVals: im.look }); if (seq !== loadSeq) return; takeLut(im, v);
     }
-    renderer.setCamLUT(im.camLut || null, CAM_LUT_N);
+    if (im.params.lutRef) { await refLutReady(im.params.lutRef); if (seq !== loadSeq) return; }
+    renderer.setCamLUT(activeLut(im), CAM_LUT_N);
     ti.style.display = 'none';
     curveEd.setCurves(im.params.curves); renderer.setCurveLUT(curveLUTFor(im.params));
     fitCanvas(); fitView(); refreshLensUI(); refreshLocalUI(); requestRender(false); showInfo(); $('#btnExport').disabled = false;
@@ -5572,7 +5919,7 @@ $('#mReset').onclick = async () => {
   if (im.lookSrc === 'camera' && !im.lookFitted && camLookOn && state.previewData && state.previewData.imId === im.id) { status('比對相機 JPEG 的亮度、白平衡與膚色…'); await fitCameraSettingsLook(im, null); status(''); if (CUR() !== im) return; }
   if (!im.look && camLookOn && !im.file._isImage && im.thumbBlobUrl && state.previewData && state.previewData.imId === im.id) {
     status('比對相機 JPEG 的色調…'); const v = await fitCameraLook(Object.assign({}, im, { params: clone(defaultsFor(im)) }), null); status('');
-    if (CUR() !== im) return; if (v) { takeLut(im, v); renderer.setCamLUT(im.camLut || null, CAM_LUT_N); im.look = v; saveLook(im); im.lookInfo = fitCameraLook.last; }
+    if (CUR() !== im) return; if (v) { takeLut(im, v); im.look = v; saveLook(im); im.lookInfo = fitCameraLook.last; }
   }
   im.params = startingParams(im); im.presetId = null; refreshAll(); fitView(); commit();
   toast(im.look && camLookOn ? (im.lookSrc === 'camera' ? '已重設為相機寫入的設定' : '已重設為相機 JPEG 的色調') : '已重設這張照片', 5000, { action: { label: '復原', fn: undo } });
@@ -5645,7 +5992,7 @@ $('#expGo').onclick = async () => {
     }
     else if (state.cancelExport) $('#expMsg').textContent = '已取消';
   } catch (e) { console.error(e); $('#expMsg').textContent = '匯出失敗：' + friendlyError(e); }
-  finally { renderer.setCamLUT(CUR() && CUR().camLut || null, CAM_LUT_N); state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expGo').classList.add('primary'); $('#expCancel').textContent = '關閉'; $('#expCancel').style.display = ''; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
+  finally { renderer.setCamLUT(CUR() ? activeLut(CUR()) : null, CAM_LUT_N); state.busy = false; $('#expGo').disabled = false; $('#expGo').textContent = '再次匯出'; $('#expGo').classList.add('primary'); $('#expCancel').textContent = '關閉'; $('#expCancel').style.display = ''; $('#expBar').style.width = '100%'; if (CUR() && state.previewData && state.previewData.imId === CUR().id) { /* preview source restored by renderer */ } requestRender(false); }
 };
 async function exportImage(im, o, prog) {
   let params = im.params; const Gfull0 = geometry(params.geo, im.fullW || 1, im.fullH || 1);
@@ -5660,8 +6007,9 @@ async function exportImage(im, o, prog) {
   if (needsCamLook(im) && im.lookSrc === 'camera' && !im.lookFitted) { prog('比對相機 JPEG 的亮度、白平衡與膚色…', 0.06); await fitCameraSettingsLook(im, src); }
   if (needsCamLook(im) && im.look) { applyCameraLook(im, im.look); params = im.params; }
   else if (needsCamLook(im)) { prog('比對相機 JPEG 的色調…', 0.06); const vals = await fitCameraLook(im, src); if (vals) { takeLut(im, vals); applyCameraLook(im, vals); saveLook(im); } params = im.params; }
-  if (im.look && !im.camLut && (params.camColor || 0) > 0 && camLookOn && im.thumbBlobUrl) takeLut(im, await fitCameraLook(im, src, () => false, { lookVals: im.look }));
-  renderer.setCamLUT(im.camLut || null, CAM_LUT_N);
+  if (im.look && !im.camLut && (params.camColor || 0) > 0 && camLookOn && im.thumbBlobUrl && !params.lutRef) takeLut(im, await fitCameraLook(im, src, () => false, { lookVals: im.look }));
+  if (params.lutRef) await refLutReady(params.lutRef);
+  renderer.setCamLUT(lutFor(params, im), CAM_LUT_N);
   if ((params.spots || []).length) { const data = src === state.previewData ? new Uint16Array(src.data) : src.data; applySpotsToBuffer(data, src.w, src.h, src.scale, params.spots, im); src = Object.assign({}, src, { data }); }
   const fullW = src.w * src.scale, fullH = src.h * src.scale;
   const G = geometry(params.geo, fullW, fullH);
@@ -5686,7 +6034,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {
