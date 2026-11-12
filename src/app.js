@@ -65,8 +65,8 @@ function friendlyError(e) {
 // ---------- state ----------
 const images = []; let cur = -1;
 const state = { zoom: 1, panX: 0, panY: 0, compare: 0, split: 0.5, cropMode: false, tab: 'light', hq: false, hist: true, clipboard: null, previewData: null, busy: false,
-  maskSel: -1, showMask: false, tool: { size: 20, feather: 60, flow: 100, erase: false, spotSize: 25, spotFeather: 50, dustSens: 30, healMode: 'heal' }, cursor: null };
-const TOOL_DEFAULTS = { size: 20, feather: 60, flow: 100, spotSize: 25, spotFeather: 50, dustSens: 30 };
+  maskSel: -1, showMask: false, tool: { size: 20, feather: 60, flow: 100, erase: false, spotSize: 25, spotFeather: 50, dustSens: 30, blemSens: 50, healMode: 'heal' }, cursor: null };
+const TOOL_DEFAULTS = { size: 20, feather: 60, flow: 100, spotSize: 25, spotFeather: 50, dustSens: 30, blemSens: 50 };
 const SPOT_DEFAULTS = { size: 25, feather: 50, opacity: 100, pupil: 50, darken: 50 };
 // JPEG/HEIC/PNG were already sharpened and denoised in the camera, so they start without the RAW capture sharpening / colour NR.
 const IMG_DEFAULTS = Object.assign(clone(DEFAULTS), { sharpen: 0, nrColor: 0 });
@@ -1880,13 +1880,13 @@ function healSpot(d, w, h, cx, cy, r, ox, oy, feather, opacity, heal) {
   }
 }
 // Automatic source: compare the ring around the spot with rings around 48 candidates (3 distances x 16 angles).
-function autoSpotSource(d, w, h, cx, cy, r) {
+function autoSpotSource(d, w, h, cx, cy, r, bad) { // bad(x, y): this place may not be the source
   const ring = (x, y, r0, r1) => { const o = []; const t = [0, 0, 0];
     for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2; for (const rr of [r0, (r0 + r1) / 2, r1]) { const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr; if (px < 0 || py < 0 || px >= w || py >= h) return null; bilinear3(d, w, h, px, py, t); o.push(t[0] / 65535, t[1] / 65535, t[2] / 65535); } }
     return o; };
   const A = ring(cx, cy, 1.05 * r, 1.6 * r); let best = null, bs = Infinity;
   for (const k of [2.4, 3.2, 4.2]) for (let i = 0; i < 16; i++) {
-    const a = i / 16 * Math.PI * 2, ox = Math.cos(a) * k * r, oy = Math.sin(a) * k * r; if (!A) break;
+    const a = i / 16 * Math.PI * 2, ox = Math.cos(a) * k * r, oy = Math.sin(a) * k * r; if (!A) break; if (bad && bad(cx + ox, cy + oy)) continue;
     const B = ring(cx + ox, cy + oy, 1.05 * r, 1.6 * r); if (!B) continue;
     let S = 0; for (let j = 0; j < A.length; j++) { const q = Math.sqrt(Math.max(A[j], 0)) - Math.sqrt(Math.max(B[j], 0)); S += q * q; }
     const I = ring(cx + ox, cy + oy, 0.2 * r, 0.9 * r);
@@ -2023,6 +2023,8 @@ function buildHealPanel(sec) {
   sec.append(makeSlider('T.spotSize', '新增點的大小', 1, 100, 1, fmt.pos), makeSlider('T.spotFeather', '新增點的羽化', 0, 100, 1, fmt.pos));
   sec.append(el('div', { class: 'hint' }, IS_TOUCH ? '點一下照片放修復點，來源會自動挑選；拖曳白圈移動位置，拖曳藍色虛線圈換來源。雙指可縮放。' : '點一下照片放修復點，來源會自動挑選；拖曳白圈移動位置，拖曳藍色虛線圈換來源。滾輪縮放。'));
   healUI.edit = el('div', {}); sec.append(healUI.edit);
+  sec.append(hdr('皮膚瑕疵（AI）'), el('div', { class: 'toolbar' }, el('button', { title: 'AI 找出臉上的痘痘與斑點，各放一個修復點（在這台裝置上跑，不上傳）', onclick: () => aiBlemish() }, '去除瑕疵（AI）')), makeSlider('T.blemSens', '偵測靈敏度', 0, 100, 1, fmt.pos),
+    el('div', { class: 'hint' }, '第一次要下載約 36 MB 的模型，每張臉要算幾秒到十幾秒。調整靈敏度後再按一次會馬上重算；每個點都可以點選後刪除或移動。'));
   sec.append(hdr('灰塵（底片掃描）'), el('div', { class: 'toolbar' }, el('button', { onclick: () => detectDust(state.tool.dustSens ?? 30) }, '自動偵測灰塵')), makeSlider('T.dustSens', '偵測靈敏度', 0, 100, 1, fmt.pos));
   refreshHealUI();
 }
@@ -2321,6 +2323,108 @@ async function runSubjectAI(im) {
   let s = ''; for (let i = 0; i < z.length; i += 32768) s += String.fromCharCode.apply(null, z.subarray(i, i + 32768));
   const zz = btoa(s); AI.cache.set(zz, map); status('');
   return { z: zz, w: 320, h: 320, ms: Math.round(performance.now() - t0), geo: { rot: im.params.geo.rot, flipH: im.params.geo.flipH, flipV: im.params.geo.flipV } };
+}
+// ---------- 「去除瑕疵（AI）」: skin blemishes found by a network, removed by the ordinary heal spots ----------
+// As Lightroom's Blemish Removal: the AI only says where, the repair is the content-aware heal that is already here. Faces: YuNet
+// (OpenCV Zoo, MIT, 0.2 MB). Blemishes: the local detection U-Net of ABPN (Lei et al., CVPR 2022; Alibaba DAMO ModelScope
+// cv_unet_skin_retouching, Apache-2.0; ONNX export after github.com/aoguai/skin-retouching-onnxruntime), weights stored as float16
+// (36 MB). It is given each face as that pipeline does: a square 1.5 x the face box, at 768 px, RGB in -1..1; its output is a mask.
+async function aiModelFile(name, label) { // a file of models/, from the cache when it is there; label: shown with the progress
+  const url = new URL(RETOUCH_URL + name, location.href).href;
+  try { const c = await caches.open('raw-editor-models'), hit = await c.match(url); if (hit) return await hit.arrayBuffer(); } catch { }
+  const r = await fetch(url); if (!r.ok) throw new Error('模型下載失敗 ' + r.status);
+  const total = +r.headers.get('content-length') || 0, rd = r.body.getReader(), parts = []; let got = 0;
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; if (label) status(`${label} ${(got / 1048576).toFixed(0)}${total ? ' / ' + (total / 1048576).toFixed(0) : ''} MB`); }
+  const buf = await new Blob(parts).arrayBuffer();
+  try { await (await caches.open('raw-editor-models')).put(url, new Response(buf, { headers: { 'content-type': 'application/octet-stream' } })); } catch { }
+  return buf;
+}
+async function loadBlemishModels() {
+  if (AI.blem) return AI.blem;
+  const BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+  const ort = AI.ort || (AI.ort = await import(BASE + 'esm/ort.wasm-core.min.js'));
+  ort.env.wasm.wasmPaths = BASE; ort.env.wasm.numThreads = 1; ort.env.wasm.proxy = false;
+  const f = await aiModelFile('yunet.onnx'), b = await aiModelFile('blemish.onnx', '下載瑕疵偵測模型…');
+  status('準備瑕疵偵測模型…'); await new Promise(r => setTimeout(r, 30));
+  return AI.blem = { face: await ort.InferenceSession.create(f, { executionProviders: ['wasm'] }), det: await ort.InferenceSession.create(b, { executionProviders: ['wasm'] }) };
+}
+const rgbaCanvas = r => { const c = document.createElement('canvas'); c.width = r.w; c.height = r.h; c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.px.buffer.slice(0)), r.w, r.h), 0, 0); return c; };
+// faces of a picture (a canvas): [{x, y, w, h, score}] as fractions of the picture, largest first
+async function findFaces(sess, cv) {
+  const ort = AI.ort, S = 640, k = S / Math.max(cv.width, cv.height), c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d', { willReadFrequently: true }); g.fillStyle = '#000'; g.fillRect(0, 0, S, S); g.drawImage(cv, 0, 0, cv.width * k, cv.height * k);
+  const d = g.getImageData(0, 0, S, S).data, x = new Float32Array(3 * S * S); for (let i = 0; i < S * S; i++) for (let ch = 0; ch < 3; ch++) x[ch * S * S + i] = d[i * 4 + 2 - ch]; // BGR, 0..255
+  const o = await sess.run({ [sess.inputNames[0]]: new ort.Tensor('float32', x, [1, 3, S, S]) }), all = [];
+  for (const st of [8, 16, 32]) { // as OpenCV's FaceDetectorYN: score = sqrt(cls * obj), box = cell + offset, size = exp() cells
+    const n = S / st, cls = o['cls_' + st].data, obj = o['obj_' + st].data, bb = o['bbox_' + st].data;
+    for (let i = 0; i < n * n; i++) {
+      const sc = Math.sqrt(Math.max(cls[i], 0) * Math.max(obj[i], 0)); if (sc < 0.6) continue;
+      const cx = (i % n + bb[i * 4]) * st, cy = (Math.floor(i / n) + bb[i * 4 + 1]) * st, w = Math.exp(bb[i * 4 + 2]) * st, h = Math.exp(bb[i * 4 + 3]) * st;
+      all.push({ score: sc, x: (cx - w / 2) / k / cv.width, y: (cy - h / 2) / k / cv.height, w: w / k / cv.width, h: h / k / cv.height });
+    }
+  }
+  all.sort((a, b) => b.score - a.score); const keep = [];
+  for (const f of all) if (!keep.some(q => { const ix = Math.max(0, Math.min(f.x + f.w, q.x + q.w) - Math.max(f.x, q.x)), iy = Math.max(0, Math.min(f.y + f.h, q.y + q.h) - Math.max(f.y, q.y)); return ix * iy / (f.w * f.h + q.w * q.h - ix * iy) > 0.3; })) keep.push(f);
+  return keep.sort((a, b) => b.w * b.h - a.w * a.h);
+}
+const BLEM_S = 768, BLEM_FACES = 6, BLEM_R = 0.02; // BLEM_R: the largest single spot, as a share of the face crop
+const blemKey = im => im.id + '|' + JSON.stringify(im.params.geo) + '|' + JSON.stringify((im.params.spots || []).filter(s => !s.blem));
+async function aiBlemish() {
+  const im = CUR(), pd = state.previewData; if (!im || !pd || pd.imId !== im.id || aiBlemish.busy) return; aiBlemish.busy = true;
+  try {
+    const had = (im.params.spots || []).some(s => s.blem);
+    if (had) { im.params.spots = im.params.spots.filter(s => !s.blem); healUI.sel = -1; refreshSpotSource(im); } // the earlier answer is replaced
+    const key = blemKey(im); let C = aiBlemish.cache;
+    if (!C || C.key !== key) { // the masks are kept: another sensitivity only thresholds them again
+      status('AI 找瑕疵…（第一次要下載約 36 MB 的模型）'); const M = await loadBlemishModels(), ort = AI.ort; if (CUR() !== im) return;
+      const U = uniformsFromParams(im.params, im); U.showMask = -1; U.clipWarn = 0;
+      const G = geometry(im.params.geo, im.fullW, im.fullH, true); status('AI 找臉…'); await new Promise(r => setTimeout(r, 30));
+      const faces = (await findFaces(M.face, rgbaCanvas(renderer.readSmall(U, G, 640, 'ai')))).slice(0, BLEM_FACES); C = { key, faces: [] };
+      for (let fi = 0; fi < faces.length; fi++) {
+        const f = faces[fi], side = Math.max(f.w * G.outW, f.h * G.outH) * 1.5, cx = (f.x + f.w / 2) * G.outW, cy = (f.y + f.h / 2) * G.outH;
+        const x0 = Math.max(0, cx - side / 2), y0 = Math.max(0, cy - side / 2), x1 = Math.min(G.outW, cx + side / 2), y1 = Math.min(G.outH, cy + side / 2);
+        const Gf = geometry(Object.assign({}, im.params.geo, { crop: { x: x0 / G.outW, y: y0 / G.outH, w: (x1 - x0) / G.outW, h: (y1 - y0) / G.outH } }), im.fullW, im.fullH);
+        status(`AI 找瑕疵…第 ${fi + 1} / ${faces.length} 張臉（每張要幾秒到十幾秒）`); await new Promise(r => setTimeout(r, 30));
+        const S = BLEM_S, c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high';
+        g.drawImage(rgbaCanvas(renderer.readSmall(U, Gf, S, 'ai')), 0, 0, S, S);
+        const d = g.getImageData(0, 0, S, S).data, x = new Float32Array(3 * S * S); for (let i = 0; i < S * S; i++) for (let ch = 0; ch < 3; ch++) x[ch * S * S + i] = d[i * 4 + ch] / 127.5 - 1;
+        const lg = (await M.det.run({ image: new ort.Tensor('float32', x, [1, 3, S, S]) })).mask_logits.data; if (CUR() !== im) return;
+        C.faces.push({ Gf, lg: new Float32Array(lg), facePx: Math.round(Math.max(f.w * G.outW, f.h * G.outH) / pd.scale) });
+      }
+      aiBlemish.cache = C;
+    }
+    if (!C.faces.length) { toast('沒有找到臉：這個功能只找臉上的瑕疵', 5000); if (had) { refreshHealUI(); commit(); drawOverlay(); } return 0; }
+    // sensitivity 0..100 -> probability 0.8..0.2 (the model's own pipeline uses 0.5), as a logit
+    const sens = state.tool.blemSens ?? 50, pr = 0.8 - 0.6 * sens / 100, thr = Math.log(pr / (1 - pr)), S = BLEM_S, Lm = Math.max(im.fullW, im.fullH), { toSrcFull } = healGeom(im), found = [];
+    for (const F of C.faces) {
+      const lg = F.lg, seen = new Uint8Array(S * S), one = [];
+      for (let s0 = 0; s0 < S * S; s0++) {
+        if (seen[s0] || lg[s0] < thr) continue; const st = [s0], pix = []; seen[s0] = 1; let cnt = 0, mx = 0, my = 0, bx0 = S, bx1 = 0, by0 = S, by1 = 0, peak = -1e9;
+        while (st.length) { const q = st.pop(), qx = q % S, qy = (q - qx) / S; pix.push(q); cnt++; mx += qx; my += qy; bx0 = Math.min(bx0, qx); bx1 = Math.max(bx1, qx); by0 = Math.min(by0, qy); by1 = Math.max(by1, qy); peak = Math.max(peak, lg[q]);
+          for (const t of [q - 1, q + 1, q - S, q + S]) { if (t < 0 || t >= S * S || seen[t] || lg[t] < thr || Math.abs(t % S - qx) > 1) continue; seen[t] = 1; st.push(t); } }
+        const r = Math.max(bx1 - bx0 + 1, by1 - by0 + 1) / 2; if (cnt < 8 || r > 0.09 * S) continue; // a speck of noise; a whole patch is left alone
+        const put = (x, y, r) => { const p = mapPt(F.Gf.m, (x + 0.5) / S * F.Gf.outW, (y + 0.5) / S * F.Gf.outH); one.push({ x: p[0] / Lm, y: p[1] / Lm, r: Math.max(r * 1.35 + 1, 3) / S * (F.Gf.outW + F.Gf.outH) / 2 / Lm, peak }); };
+        if (r <= BLEM_R * S) { put(mx / cnt, my / cnt, r); continue; }
+        // blemishes that run together: one big circle would take its source from far away (an eye, the hair), so the blob is
+        // covered by small spots, one per cell of a grid
+        const cell = Math.round(BLEM_R * S * 1.6), cells = new Map();
+        for (const q of pix) { const qx = q % S, qy = (q - qx) / S, k = Math.floor(qx / cell) + ',' + Math.floor(qy / cell); let c = cells.get(k); if (!c) cells.set(k, c = [0, 0, 0, S, 0, S, 0]); c[0]++; c[1] += qx; c[2] += qy; c[3] = Math.min(c[3], qx); c[4] = Math.max(c[4], qx); c[5] = Math.min(c[5], qy); c[6] = Math.max(c[6], qy); }
+        for (const c of cells.values()) if (c[0] >= 6) put(c[1] / c[0], c[2] / c[0], Math.max(c[4] - c[3] + 1, c[6] - c[5] + 1) / 2);
+      }
+      one.sort((a, b) => b.peak - a.peak); found.push(...one.slice(0, 80));
+    }
+    const P = found.map(f => { const c = toSrcFull(f.x, f.y); return [c[0] / pd.scale, c[1] / pd.scale, Math.max(1, f.r * Lm / pd.scale)]; }), add = [];
+    found.forEach((f, i) => { // the source is taken from clean skin: not on another blemish
+      const [cx, cy, r] = P[i], o = autoSpotSource(pd.data, pd.w, pd.h, cx, cy, r, (x, y) => P.some((q, j) => j !== i && Math.hypot(q[0] - x, q[1] - y) < q[2] + r));
+      add.push({ mode: 'heal', x: f.x, y: f.y, r: f.r, ox: o[0] * pd.scale / Lm, oy: o[1] * pd.scale / Lm, feather: 60, opacity: 100, blem: 1 });
+    });
+    aiBlemish.last = { faces: C.faces.length, spots: add.length, facePx: C.faces.map(f => f.facePx) };
+    if (!add.length && !had) { toast(`找到 ${C.faces.length} 張臉，沒有發現明顯的瑕疵；可以把靈敏度調高再按一次`, 5000); return 0; }
+    im.params.spots = (im.params.spots || []).concat(add); refreshSpotSource(im); refreshHealUI(); commit(); drawOverlay();
+    const small = Math.min(...C.faces.map(f => f.facePx)) < 250 ? '；臉在畫面裡很小，可能會漏抓' : '';
+    toast(`${C.faces.length} 張臉，修掉 ${add.length} 個瑕疵。可以點個別的點刪除，或調整靈敏度再按一次${small}`, 7000, { kind: 'ok', action: { label: '復原', fn: undo } }); return add.length;
+  } catch (e) { console.error(e); toast('去除瑕疵無法使用（' + (e.message || e) + '）', 5000, { kind: 'err' }); }
+  finally { aiBlemish.busy = false; status(''); }
 }
 // ---------- 「AI 修圖」: the photo retouched to the model's own taste, on this device ----------
 // Image-Adaptive 3D LUT (Zeng et al., TPAMI 2020; code and weights Apache-2.0, github.com/HuiZeng/Image-Adaptive-3DLUT): a small CNN
@@ -3333,7 +3437,7 @@ async function exportImage(im, o, prog) {
 }
 
 // ---------- boot ----------
-window.__dbg = { aiRetouch, aiLightBeam, styleToAll, refStyle, locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
+window.__dbg = { aiBlemish, findFaces, aiRetouch, aiLightBeam, styleToAll, refStyle, locateReference, referenceTarget, geoFromRef, curveFromPairs, cdfCurve, fitCamLUTCV, lutAt, matchStyle, styleStats, applyReference, refLuts, lutFor, saveRefLut, loadRefLut, migrateGlow, lookFromCameraSettings, lensfunFor, lensfunDB, alignJpeg, warpJpeg, fitCamLUT, cellRGB, fitCameraLook, lookStats, LOOK_KEYS, needsCamLook, clearCameraLook, hslBandW, startingParams, activeMask, smartAlpha, upgradeSubjectMask, AI, syncBrush, solveUpright, findVP, computeUpright, autoStraighten, detectSegments, uprightImage, levelAngle, horizonAngle, perspPx, mapPt, isoToCanvas, healUI, addSpotAt, detectDust, applySpotsToBuffer, refreshSpotSource, autoTone, profileParams, PROFILES, displayedColorAt, pickColorAt, curveLUTFor, calibMatrix, wbFromRGB, autoWB, histLabel, pasteSettings, COPY_GROUPS, FILM_LUTS: typeof FILM_LUTS !== "undefined" ? FILM_LUTS : null, decodeFilmLUT, loadFilmLUTs, images, state, clone, defaultsFor, applyPreset, CurveEditor, schedulePresetThumbs, get renderer() { return renderer; }, get cur() { return CUR(); }, selectTab, setParam, commit, geometry, requestRender, exportImage, applyPresetUI, PRESETS, selectImage, undo, redo, refreshAll, updateHistogram, curveEd, decodeFile, addMask, activeMask, selectMask, strokeStart, strokeMove, isoToCanvas, canvasToIso, maskDrag, BR, uniformsFromParams, buildLensTable, get view() { return view; } };
 buildPanels(); initDesignUI(); fitCanvas();
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 (async () => {

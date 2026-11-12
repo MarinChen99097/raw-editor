@@ -125,3 +125,7 @@ LibRaw：LGPL 2.1 / CDDL 1.0（`src/vendor/`）。WebAssembly 建置來自 @colo
 ## AI 修圖
 
 「AI 自動」(光線分頁) uses the Image-Adaptive 3D LUT model (Zeng et al., TPAMI 2020, https://github.com/HuiZeng/Image-Adaptive-3DLUT, Apache-2.0; weights trained on MIT-Adobe FiveK, for personal non-commercial use). `models/ai3dlut.onnx` is the classifier exported to ONNX, `models/ai3dlut.bin` the three basis LUTs. It runs in the browser; nothing is uploaded.
+
+## 去除瑕疵（AI）
+
+「局部 → 修復 → 去除瑕疵（AI）」finds skin blemishes on faces and puts an ordinary heal spot on each (the AI only locates them; the repair is the existing heal). Faces: YuNet (`models/yunet.onnx`, OpenCV Zoo, MIT). Blemishes: the local detection U-Net of ABPN (Lei et al., CVPR 2022; Alibaba DAMO ModelScope `cv_unet_skin_retouching`, Apache-2.0), exported to ONNX after https://github.com/aoguai/skin-retouching-onnxruntime with the weights stored as float16 (`models/blemish.onnx`, 36 MB). Both run in the browser; nothing is uploaded.
